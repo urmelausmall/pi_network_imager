@@ -1,8 +1,6 @@
-version: "3.9"
-
 services:
   pi-backup:
-    image: pi-backup:latest        # oder aus Registry, wenn du baust/pushst
+    image: docker.io/urmelausmall/pinetworkimager:1.97
     container_name: pi-backup
     restart: unless-stopped
     privileged: true               # für dd + mount, pragmatisch
@@ -10,6 +8,7 @@ services:
       - "7899:8080"
     environment:
       BOOT_DEVICE: /dev/sda            # USB-SSD oder /dev/mmcblk0 – SD Karte
+      #ZERO_FILL=true
       # CIFS
       CIFS_SHARE: "//192.168.178.25/System_Backup"
       CIFS_USER: "User"
@@ -25,14 +24,23 @@ services:
 
       # Gotify
       GOTIFY_URL: "http://192.168.178.25:6742"
-      GOTIFY_TOKEN: "xxxxxxxxxxxxxx"
-      GOTIFY_ENABLED: "true"
+      GOTIFY_TOKEN: "xxxxxxxxxxxxx"
+      GOTIFY_ENABLED: "false"
+
+      # MQTT
+      MQTT_ENABLED: "false"
+      MQTT_HOST: "192.168.178.25"
+      MQTT_PORT: "1883"
+      # MQTT_USER: ""
+      # MQTT_PASS: ""
+      # MQTT_TLS: "false"
+      MQTT_DISCOVERY_PREFIX: "homeassistant"
+      MQTT_TOPIC_PREFIX: "pi-backups/pi-4gb-backup"
+      BACKUP_NODE_NAME: "pi-4gb"
 
       TZ: Europe/Berlin
 
     volumes:
-      # CIFS-Mountziel im Container (wird vom Script als Mountpoint genutzt)
-      - /mnt/syno-backup:/mnt/syno-backup
       # optional: Marker-Verzeichnis (First Boot & Abhängikeiten)
       - /docker/markers:/markers
       - /var/run/docker.sock:/var/run/docker.sock

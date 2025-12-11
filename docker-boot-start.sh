@@ -38,7 +38,7 @@ send_gotify_message() {
 
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
-log_messages="🚀 Docker-Start-Skript (Pi 4GB) gestartet\n\n"
+log_messages="🚀 Docker-Start-Skript\n\n"
 log() {
   echo "$1"
   log_messages+="$1\n"
