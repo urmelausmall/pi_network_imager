@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  pi-backup:
+    image: pi-backup:latest        # oder aus Registry, wenn du baust/pushst
+    container_name: pi-backup
+    restart: unless-stopped
+    privileged: true               # für dd + mount, pragmatisch
+    ports:
+      - "7899:8080"
+    environment:
+      BOOT_DEVICE: /dev/sda            # USB-SSD oder /dev/mmcblk0 – SD Karte
+      # CIFS
+      CIFS_SHARE: "//192.168.178.25/System_Backup"
+      CIFS_USER: "User"
+      CIFS_DOMAIN: "WORKGROUP"
+      CIFS_PASS: "Passwort"
+
+      # Backup-Einstellungen
+      IMAGE_PREFIX: "raspi-4gb-"
+      # X Versionen behalten (inkl. aktuelle Sicherung)
+      RETENTION_COUNT: "2"
+      # Delay nach Abschluss des Backups vor Docker restart
+      START_DELAY: "15"
+
+      # Gotify
+      GOTIFY_URL: "http://192.168.178.25:6742"
+      GOTIFY_TOKEN: "xxxxxxxxxxxxxx"
+      GOTIFY_ENABLED: "true"
+
+      TZ: Europe/Berlin
+
+    volumes:
+      # CIFS-Mountziel im Container (wird vom Script als Mountpoint genutzt)
+      - /mnt/syno-backup:/mnt/syno-backup
+      # optional: Marker-Verzeichnis (First Boot & Abhängikeiten)
+      - /docker/markers:/markers
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /dev:/dev

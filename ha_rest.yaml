@@ -1,0 +1,18 @@
+rest_command:
+  pi_backup_dry_run:
+    url: "http://raspberrypi4gb:8080/backup?mode=dry-run"
+    method: POST
+    content_type: "application/json"
+    payload: "{}"
+
+  pi_backup_no_health:
+    url: "http://raspberrypi4gb:8080/backup?mode=no-health"
+    method: POST
+    content_type: "application/json"
+    payload: "{}"
+
+  pi_backup_with_health:
+    url: "http://raspberrypi4gb:8080/backup?mode=with-health"
+    method: POST
+    content_type: "application/json"
+    payload: "{}"
