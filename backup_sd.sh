@@ -69,7 +69,7 @@ USAGE
 
 run_as_root() {
   if command -v run_as_root &>/dev/null; then
-    run_as_root "$@"
+    sudo "$@"
   else
     "$@"
   fi
@@ -674,19 +674,26 @@ DURATION_SEC=$(( END_TS - START_TS ))
 END_HUMAN="$(date '+%d.%m.%Y %H:%M')"
 DURATION_STR="$(format_duration "$DURATION_SEC")"
 
+MODE_TEXT="Normal"
+$DRY_RUN && MODE_TEXT="Dry-Run"
+$HEALTH_CHECK && MODE_TEXT="${MODE_TEXT} + Healthcheck"
+
+SUMMARY="Modus: ${MODE_TEXT}
+Dauer: ${DURATION_STR}
+Fertiggestellt: ${END_HUMAN}
+Datei: ${BACKUP_DIR}/${IMAGE_NAME}"
+
 if $DRY_RUN; then
   echo "⏱ Laufzeit (Dry-Run): $DURATION_STR"
   notify_gotify "Backup Dry-Run OK" \
-    "Backup Dry-Run auf $(hostname) erfolgreich.
-Geplante Datei: $BACKUP_DIR/$IMAGE_NAME
-Fertiggestellt: ${END_HUMAN} (${DURATION_STR})." \
+    "Dry-Run erfolgreich auf $(hostname)
+${SUMMARY}" \
     4
 else
   echo "⏱ Laufzeit: $DURATION_STR"
   notify_gotify "Backup erfolgreich" \
-    "Backup auf $(hostname) erfolgreich:
-$BACKUP_DIR/$IMAGE_NAME
-Retention: ${RETENTION_COUNT}
-Fertiggestellt: ${END_HUMAN} (${DURATION_STR})." \
+    "Backup erfolgreich auf $(hostname)
+${SUMMARY}" \
     5
 fi
+
