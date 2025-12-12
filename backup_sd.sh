@@ -689,6 +689,23 @@ if [[ "$MQTT_ENABLED" == true ]]; then
   local_state_topic_status="${MQTT_TOPIC_PREFIX}/${NODE_NAME}/status"
   local_state_topic_progress="${MQTT_TOPIC_PREFIX}/${NODE_NAME}/progress"
 
+
+  # Last-Run Sensor (zeigt finished_at als State + last_run als Attribute)
+mqtt_publish_config \
+  "${MQTT_DISCOVERY_PREFIX}/sensor/${NODE_NAME}_backup_last_run/config" \
+  "$(cat <<EOF
+{
+  "name": "Backup letzter Lauf ${NODE_NAME}",
+  "state_topic": "${MQTT_TOPIC_PREFIX}/${NODE_NAME}/status",
+  "value_template": "{{ value_json.last_run.finished_at if value_json.last_run is defined else 'unbekannt' }}",
+  "json_attributes_topic": "${MQTT_TOPIC_PREFIX}/${NODE_NAME}/status",
+  "json_attributes_template": "{{ value_json.last_run | tojson if value_json.last_run is defined else '{}' }}",
+  "unique_id": "${NODE_NAME}_backup_last_run",
+  "object_id": "${NODE_NAME}_backup_last_run"
+}
+EOF
+)"
+
   # Status-Sensor
   mqtt_publish_config \
     "${MQTT_DISCOVERY_PREFIX}/sensor/${NODE_NAME}_backup_status/config" \
@@ -1203,26 +1220,50 @@ Fertiggestellt: ${END_HUMAN}
 Datei: ${CIFS_SHARE}/${IMAGE_NAME}"
 
 if $DRY_RUN; then
+  # last_run ggf. aus Datei laden (falls nicht schon geladen)
+  if [[ -z "${LAST_RUN_INFO:-}" && -n "${LAST_RUN_FILE:-}" && -r "$LAST_RUN_FILE" ]]; then
+    LAST_RUN_INFO="$(cat "$LAST_RUN_FILE" 2>/dev/null || true)"
+  fi
+
   log_msg "⏱ Laufzeit (Dry-Run): $DURATION_STR"
   notify_gotify "Backup Dry-Run OK" \
     "Dry-Run erfolgreich auf ${IMAGE_PREFIX}
 ${SUMMARY}" \
     4
 
-mqtt_publish_retained "status" "$(printf '{"phase":"success","mode":"%s","dry_run":true,"duration":"%s","finished_at":"%s"}' "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN")"
-else
+  if [[ -n "${LAST_RUN_INFO:-}" ]]; then
+    mqtt_publish_retained "status" \
+      "$(printf '{"phase":"success","mode":"%s","dry_run":true,"duration":"%s","finished_at":"%s","last_run":%s}' \
+        "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN" "$LAST_RUN_INFO")"
+  else
+    mqtt_publish_retained "status" \
+      "$(printf '{"phase":"success","mode":"%s","dry_run":true,"duration":"%s","finished_at":"%s"}' \
+        "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN")"
+  fi
 
-      if [[ -n "$LAST_RUN_FILE" ]]; then
-        cat > "$LAST_RUN_FILE" <<EOF
+else
+  # last_run.json aktualisieren
+  if [[ -n "${LAST_RUN_FILE:-}" ]]; then
+    cat > "$LAST_RUN_FILE" <<EOF
 {"finished_at":"$END_HUMAN","duration":"$DURATION_STR","seconds":$DURATION_SEC,"mode":"$MODE_TEXT"}
 EOF
-      fi
+    LAST_RUN_INFO="$(cat "$LAST_RUN_FILE" 2>/dev/null || true)"
+  fi
+
+  # finaler retained Status publishen (inkl. last_run, falls vorhanden)
+  if [[ -n "${LAST_RUN_INFO:-}" ]]; then
+    mqtt_publish_retained "status" \
+      "$(printf '{"phase":"success","mode":"%s","dry_run":false,"duration":"%s","finished_at":"%s","last_run":%s}' \
+        "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN" "$LAST_RUN_INFO")"
+  else
+    mqtt_publish_retained "status" \
+      "$(printf '{"phase":"success","mode":"%s","dry_run":false,"duration":"%s","finished_at":"%s"}' \
+        "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN")"
+  fi
 
   log_msg "⏱ Laufzeit: $DURATION_STR"
   notify_gotify "Backup erfolgreich" \
     "Backup erfolgreich auf ${IMAGE_PREFIX}
 ${SUMMARY}" \
     5
-
-mqtt_publish_retained "status" "$(printf '{"phase":"success","mode":"%s","dry_run":false,"duration":"%s","finished_at":"%s"}' "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN")"
 fi
