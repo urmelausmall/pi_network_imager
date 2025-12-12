@@ -67,6 +67,26 @@ if [[ -d "$MARKER_DIR" ]]; then
   LOG_FILE="$MARKER_DIR/backup_sd.log"
 fi
 
+rotate_log() {
+  [[ -n "${LOG_FILE:-}" ]] || return 0
+  [[ -f "$LOG_FILE" ]] || return 0
+
+  local keep=10
+
+  # älteste weg
+  [[ -f "${LOG_FILE}.${keep}" ]] && rm -f "${LOG_FILE}.${keep}"
+
+  # durchschieben
+  for ((i=keep-1; i>=1; i--)); do
+    [[ -f "${LOG_FILE}.${i}" ]] && mv -f "${LOG_FILE}.${i}" "${LOG_FILE}.$((i+1))"
+  done
+
+  # aktuelles zu .1
+  mv -f "$LOG_FILE" "${LOG_FILE}.1"
+}
+
+rotate_log
+
 log_msg() {
   local msg="[$(date '+%F %T')] $*"
   # immer auf STDOUT (damit es in docker logs auftaucht)
@@ -520,6 +540,9 @@ on_error() {
 
   log_msg "❌ Backup abgebrochen mit Exit-Code ${exit_code} nach ${dur_str}"
 
+  mqtt_publish_retained "status" "$(printf '{"phase":"failure","mode":"%s","exit_code":%d}' "$MODE_TEXT" "$exit_code")"
+  mqtt_publish_retained "progress" '{"phase":"failure","percent":0}' 
+
   notify_gotify "Backup FEHLGESCHLAGEN" \
     "Backup-Script auf ${IMAGE_PREFIX} ist mit Exit-Code ${exit_code} abgebrochen.
 Fertiggestellt (Fehler): ${end_human} (${dur_str})." \
@@ -703,14 +726,44 @@ else
   mqtt_publish_retained "status" "$(printf '{"phase":"starting","mode":"%s"}' "$MODE_TEXT")"
 fi
 
-last_human="$(echo "$LAST_RUN_INFO" | sed -n 's/.*"finished_at":"\([^"]*\)".*/\1/p')"
-last_dur="$(echo "$LAST_RUN_INFO" | sed -n 's/.*"duration":"\([^"]*\)".*/\1/p')"
+# ---- Letzter Lauf aus last_run.json (falls vorhanden) ----
+last_human=""
+last_dur=""
+last_mode=""
+last_sec=""
 
-if [[ -n "$last_human" || -n "$last_dur" ]]; then
-  notify_gotify "Backup startet ($IMAGE_PREFIX)" "Modus: $MODE_TEXT\nLetzter Lauf: ${last_human:-?} (${last_dur:-?})" 4
-else
-  notify_gotify "Backup startet ($IMAGE_PREFIX)" "Modus: $MODE_TEXT\nLetzter Lauf: (keine Daten)" 4
+if [[ -n "$LAST_RUN_INFO" ]]; then
+  last_human="$(echo "$LAST_RUN_INFO" | sed -n 's/.*"finished_at":"\([^"]*\)".*/\1/p')"
+  last_dur="$(echo "$LAST_RUN_INFO" | sed -n 's/.*"duration":"\([^"]*\)".*/\1/p')"
+  last_mode="$(echo "$LAST_RUN_INFO" | sed -n 's/.*"mode":"\([^"]*\)".*/\1/p')"
+  last_sec="$(echo "$LAST_RUN_INFO" | sed -n 's/.*"seconds":\([0-9]\+\).*/\1/p')"
 fi
+
+# ---- Start-Summary bauen (mit echten Newlines) ----
+SUMMARY_START=$(
+  printf "%s" \
+"Modus: ${MODE_TEXT}
+Zero-Fill: ${ZERO_FILL}
+Retention: ${RETENTION_COUNT}
+Prefix: ${IMAGE_PREFIX}
+Ziel-Datei: ${CIFS_SHARE}/${IMAGE_NAME}
+Gotify-Nachrichten: ${GOTIFY_ENABLED}
+MQTT-Nachrichten: ${MQTT_ENABLED}"
+)
+
+if [[ -n "${DEV:-}" ]]; then
+  SUMMARY_START="${SUMMARY_START}"$'\n'"Device: ${BOOT_DEVICE}"
+fi
+
+# Letzter Lauf anhängen
+if [[ -n "$last_human" || -n "$last_dur" ]]; then
+  SUMMARY_START="${SUMMARY_START}"$'\n\n'"Letzter Lauf: ${last_human:-?} (${last_dur:-?})"
+  [[ -n "$last_mode" ]] && SUMMARY_START="${SUMMARY_START}"$'\n'"Letzter Modus: ${last_mode}"
+else
+  SUMMARY_START="${SUMMARY_START}"$'\n\n'"Letzter Lauf: (keine Daten)"
+fi
+
+notify_gotify "Backup startet (${IMAGE_PREFIX})" "$SUMMARY_START" 4
 
 
 # =========================
@@ -937,17 +990,43 @@ fi
 log_msg "DEBUG: TOTAL_BYTES für $DEV = $TOTAL_BYTES"
 
 if $DRY_RUN; then
-  log_msg "[2/5] 🧪 Dry-Run: Überspringe dd..."
+  log_msg "[2/5] 🧪 Dry-Run: simuliere dd-Progress..."
   log_msg "    Geplante Backupdatei wäre: $BACKUP_DIR/$IMAGE_NAME"
-  echo "[2/5] 🧪 Dry-Run: Überspringe dd..."
-  echo "    Geplante Backupdatei wäre: $BACKUP_DIR/$IMAGE_NAME"
+
+  # Für HA/MQTT: sicherstellen, dass total nicht 0 ist
+  [[ "${TOTAL_BYTES:-0}" -eq 0 ]] && TOTAL_BYTES=100
+
+  # Status + Progress wie beim echten Lauf
+  mqtt_publish_retained "status" \
+    "$(printf '{"phase":"dd_start","mode":"%s","dry_run":true}' "$MODE_TEXT")"
+
+  mqtt_publish_retained "progress" \
+    "$(printf '{"phase":"dd_running","bytes":0,"total":%s,"percent":0}' "$TOTAL_BYTES")"
+
+  for p in 0 25 50 75 100; do
+  mqtt_publish_retained "progress" \
+    "$(printf '{"phase":"dd_running","bytes":%s,"total":%s,"percent":%s}' \
+      $((TOTAL_BYTES * p / 100)) "$TOTAL_BYTES" "$p")"
+  sleep 2
+  done
+
+  mqtt_publish_retained "progress" \
+    "$(printf '{"phase":"dd_done","bytes":%s,"total":%s,"percent":100}' "$TOTAL_BYTES" "$TOTAL_BYTES")"
+
+  mqtt_publish_retained "status" \
+    "$(printf '{"phase":"dd_done","mode":"%s","dry_run":true}' "$MODE_TEXT")"
+
+  # Optional: Mini-Schreibtest (dein bisheriger Test)
   touch "$BACKUP_DIR/dry_run_test.txt" && rm "$BACKUP_DIR/dry_run_test.txt"
+
+  BACKUP_SUCCESS=true
 else
-if [[ "$ZERO_FILL" == "true" ]]; then
+  if [[ "$ZERO_FILL" == "true" ]]; then
     zero_free_space
   else
     log_msg "🧹 Zero-Fill deaktiviert (ZERO_FILL=false)."
   fi
+
   log_msg "[2/5] Erstelle Image von $DEV..."
 echo "[2/5] Erstelle Image von $DEV..."
 
@@ -974,6 +1053,7 @@ fi
 sync
 
 mqtt_publish_retained "progress" "$(printf '{"phase":"dd_done","bytes":%s,"total":%s,"percent":100}' "$TOTAL_BYTES" "$TOTAL_BYTES")"
+mqtt_publish_retained "status" "$(printf '{"phase":"dd_done","mode":"%s"}' "$MODE_TEXT")"
 BACKUP_SUCCESS=true
 fi
 
@@ -983,6 +1063,8 @@ fi
 
 # 4) Docker Start
 log_msg "[3/5] Starte Docker-Container..."
+mqtt_publish_retained "status" "$(printf '{"phase":"booting","mode":"%s"}' "$MODE_TEXT")"
+
 
 if ! command -v docker &>/dev/null; then
   log_msg "→ Docker nicht installiert, überspringe Container-Start."
@@ -1057,6 +1139,8 @@ EOF
   fi
 fi
 
+mqtt_publish_retained "status" "$(printf '{"phase":"boot_done","mode":"%s"}' "$MODE_TEXT")"
+
 # 4b) Healthcheck nach Stack-Start
 if ! $DRY_RUN && $HEALTH_CHECK; then
   log_msg "🔍 Healthcheck des Backups läuft..."
@@ -1125,7 +1209,7 @@ if $DRY_RUN; then
 ${SUMMARY}" \
     4
 
-  mqtt_publish_retained "status" "$(printf '{"phase":"done","mode":"%s","dry_run":true,"duration":"%s","finished_at":"%s"}' "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN")"
+mqtt_publish_retained "status" "$(printf '{"phase":"success","mode":"%s","dry_run":true,"duration":"%s","finished_at":"%s"}' "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN")"
 else
 
       if [[ -n "$LAST_RUN_FILE" ]]; then
@@ -1140,5 +1224,5 @@ EOF
 ${SUMMARY}" \
     5
 
-  mqtt_publish_retained "status" "$(printf '{"phase":"done","mode":"%s","dry_run":false,"duration":"%s","finished_at":"%s"}' "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN")"
+mqtt_publish_retained "status" "$(printf '{"phase":"success","mode":"%s","dry_run":false,"duration":"%s","finished_at":"%s"}' "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN")"
 fi
