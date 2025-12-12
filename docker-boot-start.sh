@@ -13,11 +13,17 @@ GOTIFY_URL="${GOTIFY_URL:-}"
 GOTIFY_TOKEN="${GOTIFY_TOKEN:-}"
 GOTIFY_ENABLED="${GOTIFY_ENABLED:-true}"
 
+SKIP_BOOT_MSG="${SKIP_BOOT_MSG:-false}"
+
+
 send_gotify_message() {
   local msg="$1"
 
   # Wenn Gotify global deaktiviert oder keine URL/TOKEN → nichts senden
   if [[ "$GOTIFY_ENABLED" != "true" ]]; then
+    return 0
+  fi
+  if [[ "${SKIP_BOOT_MSG,,}" == "true" ]]; then
     return 0
   fi
   if [[ -z "${GOTIFY_URL:-}" || -z "${GOTIFY_TOKEN:-}" ]]; then
@@ -159,3 +165,5 @@ done
 # ─── Abschluss ───────────────────────────────────────────────────────────────
 log "✅ Alle Container gestartet"
 send_gotify_message "$(printf '%b' "$log_messages")"
+
+

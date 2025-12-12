@@ -40,7 +40,7 @@ CIFS_GID="${CIFS_GID:-1000}"
 
 # Gotify Defaults (per ENV überschreibbar)
 GOTIFY_URL="${GOTIFY_URL:-http://192.168.178.25:6742}"
-GOTIFY_TOKEN="${GOTIFY_TOKEN:-ALP6Ru9PccuRao_}"
+GOTIFY_TOKEN="${GOTIFY_TOKEN:-xxxxxxxx}"
 GOTIFY_ENABLED="${GOTIFY_ENABLED:-true}"
 
 # MQTT Defaults (per ENV überschreibbar)
@@ -88,6 +88,15 @@ else
   NODE_NAME="$(hostname)"
 fi
 
+LAST_RUN_FILE=""
+LAST_RUN_INFO=""
+if [[ -d "$MARKER_DIR" ]]; then
+  LAST_RUN_FILE="$MARKER_DIR/last_run.json"
+  if [[ -r "$LAST_RUN_FILE" ]]; then
+    LAST_RUN_INFO="$(cat "$LAST_RUN_FILE" 2>/dev/null || true)"
+  fi
+fi
+
 dd_progress_reader() {
   local last_percent=-1
   local line trimmed raw bytes percent
@@ -116,7 +125,7 @@ dd_progress_reader() {
         last_percent=$percent
       fi
 
-      mqtt_publish "progress" "$(printf '{"phase":"dd_running","bytes":%s,"total":%s,"percent":%s}' "$bytes" "$TOTAL_BYTES" "$percent")"
+      mqtt_publish_retained "progress" "$(printf '{"phase":"dd_running","bytes":%s,"total":%s,"percent":%s}' "$bytes" "$TOTAL_BYTES" "$percent")"
     fi
   done
 }
@@ -458,6 +467,19 @@ mqtt_publish() {
   mosquitto_pub "${base_args[@]}" -t "$topic" -m "$payload" >/dev/null 2>&1 || true
 }
 
+mqtt_publish_retained() {
+  local subtopic="$1"
+  local payload="$2"
+
+  [[ "$MQTT_ENABLED" == true ]] || return 0
+  ensure_mqtt_cli || return 0
+
+  local topic="${MQTT_TOPIC_PREFIX}/${NODE_NAME}/${subtopic}"
+  mapfile -t base_args < <(mqtt_build_args)
+
+  mosquitto_pub "${base_args[@]}" -t "$topic" -m "$payload" -r >/dev/null 2>&1 || true
+}
+
 mqtt_publish_config() {
   local topic="$1"
   local payload="$2"
@@ -674,7 +696,22 @@ EOF
 )"
 fi
 
-mqtt_publish "status" "$(printf '{"phase":"starting","mode":"%s"}' "$MODE_TEXT")"
+
+if [[ -n "$LAST_RUN_INFO" ]]; then
+  mqtt_publish_retained "status" "$(printf '{"phase":"starting","mode":"%s","last_run":%s}' "$MODE_TEXT" "$LAST_RUN_INFO")"
+else
+  mqtt_publish_retained "status" "$(printf '{"phase":"starting","mode":"%s"}' "$MODE_TEXT")"
+fi
+
+last_human="$(echo "$LAST_RUN_INFO" | sed -n 's/.*"finished_at":"\([^"]*\)".*/\1/p')"
+last_dur="$(echo "$LAST_RUN_INFO" | sed -n 's/.*"duration":"\([^"]*\)".*/\1/p')"
+
+if [[ -n "$last_human" || -n "$last_dur" ]]; then
+  notify_gotify "Backup startet ($IMAGE_PREFIX)" "Modus: $MODE_TEXT\nLetzter Lauf: ${last_human:-?} (${last_dur:-?})" 4
+else
+  notify_gotify "Backup startet ($IMAGE_PREFIX)" "Modus: $MODE_TEXT\nLetzter Lauf: (keine Daten)" 4
+fi
+
 
 # =========================
 # Abhängigkeits-Checks
@@ -914,27 +951,29 @@ if [[ "$ZERO_FILL" == "true" ]]; then
   log_msg "[2/5] Erstelle Image von $DEV..."
 echo "[2/5] Erstelle Image von $DEV..."
 
-mqtt_publish "status" "$(printf '{"phase":"dd_start","mode":"%s"}' "$MODE_TEXT")"
-mqtt_publish "progress" "$(printf '{"phase":"dd_start","bytes":0,"total":%s,"percent":0}' "$TOTAL_BYTES")"
+mqtt_publish_retained "status" "$(printf '{"phase":"dd_start","mode":"%s"}' "$MODE_TEXT")"
+mqtt_publish_retained "progress" "$(printf '{"phase":"dd_start","bytes":0,"total":%s,"percent":0}' "$TOTAL_BYTES")"
 
 set +e
-dd if="$DEV" bs=4M status=progress \
-  2> >(
-    dd_progress_reader
-  ) \
-  | $ZIP_CMD > "$BACKUP_DIR/$IMAGE_NAME"
+dd if="$DEV" bs=4M status=progress 2> >(
+  if command -v stdbuf >/dev/null 2>&1; then
+    stdbuf -o0 -e0 tr '\r' '\n'
+  else
+    tr '\r' '\n'
+  fi | dd_progress_reader
+) | $ZIP_CMD > "$BACKUP_DIR/$IMAGE_NAME"
 DD_EXIT=$?
 set -e
 
 if (( DD_EXIT != 0 )); then
   echo "❌ dd/pigz Exit-Code: $DD_EXIT" >&2
-  mqtt_publish "status" "$(printf '{"phase":"error","mode":"%s","dd_exit":%d}' "$MODE_TEXT" "$DD_EXIT")"
+  mqtt_publish_retained "status" "$(printf '{"phase":"error","mode":"%s","dd_exit":%d}' "$MODE_TEXT" "$DD_EXIT")"
   exit 1
 fi
 
 sync
 
-mqtt_publish "progress" "$(printf '{"phase":"dd_done","bytes":%s,"total":%s,"percent":100}' "$TOTAL_BYTES" "$TOTAL_BYTES")"
+mqtt_publish_retained "progress" "$(printf '{"phase":"dd_done","bytes":%s,"total":%s,"percent":100}' "$TOTAL_BYTES" "$TOTAL_BYTES")"
 BACKUP_SUCCESS=true
 fi
 
@@ -1074,9 +1113,10 @@ $DRY_RUN && MODE_TEXT="Dry-Run"
 $HEALTH_CHECK && MODE_TEXT="${MODE_TEXT} + Healthcheck"
 
 SUMMARY="Modus: ${MODE_TEXT}
+Zero-Fill: ${ZERO_FILL}
 Dauer: ${DURATION_STR}
 Fertiggestellt: ${END_HUMAN}
-Datei: ${BACKUP_DIR}/${IMAGE_NAME}"
+Datei: ${CIFS_SHARE}/${IMAGE_NAME}"
 
 if $DRY_RUN; then
   log_msg "⏱ Laufzeit (Dry-Run): $DURATION_STR"
@@ -1085,13 +1125,20 @@ if $DRY_RUN; then
 ${SUMMARY}" \
     4
 
-  mqtt_publish "status" "$(printf '{"phase":"done","mode":"%s","dry_run":true,"duration":"%s","finished_at":"%s"}' "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN")"
+  mqtt_publish_retained "status" "$(printf '{"phase":"done","mode":"%s","dry_run":true,"duration":"%s","finished_at":"%s"}' "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN")"
 else
+
+      if [[ -n "$LAST_RUN_FILE" ]]; then
+        cat > "$LAST_RUN_FILE" <<EOF
+{"finished_at":"$END_HUMAN","duration":"$DURATION_STR","seconds":$DURATION_SEC,"mode":"$MODE_TEXT"}
+EOF
+      fi
+
   log_msg "⏱ Laufzeit: $DURATION_STR"
   notify_gotify "Backup erfolgreich" \
     "Backup erfolgreich auf ${IMAGE_PREFIX}
 ${SUMMARY}" \
     5
 
-  mqtt_publish "status" "$(printf '{"phase":"done","mode":"%s","dry_run":false,"duration":"%s","finished_at":"%s"}' "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN")"
+  mqtt_publish_retained "status" "$(printf '{"phase":"done","mode":"%s","dry_run":false,"duration":"%s","finished_at":"%s"}' "$MODE_TEXT" "$DURATION_STR" "$END_HUMAN")"
 fi

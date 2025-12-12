@@ -6,8 +6,4 @@ docker buildx build \
   --platform linux/arm64 \
   -t urmelausmall/pinetworkimager:1.2 \
   --push \
-  .docker buildx build \
-  --platform linux/arm64 \
-  -t urmelausmall/pinetworkimager:1.2 \
-  --push \
   .

@@ -8,8 +8,9 @@ services:
       - "7899:8080"
     environment:
       BOOT_DEVICE: /dev/sda            # USB-SSD oder /dev/mmcblk0 – SD Karte
-      #ZERO_FILL=true
-      # CIFS
+      # ZERO_FILL=true
+      # SKIP_BOOT_MSG: true
+
       CIFS_SHARE: "//192.168.178.25/System_Backup"
       CIFS_USER: "User"
       CIFS_DOMAIN: "WORKGROUP"

@@ -114,14 +114,14 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[API] Starte Backup: mode={mode}, ZERO_FILL={env['ZERO_FILL']}", flush=True)
 
         # Gotify-Startmeldung
-        send_gotify(
-            title=f"Backup Trigger ({mode})",
-            message=(
-                f"Backup-Container (Image: {IMAGE_PREFIX}) wurde gestartet "
-                f"(Modus: {mode}, ZERO_FILL={env['ZERO_FILL']})."
-            ),
-            priority=4,
-        )
+        #send_gotify(
+        #    title=f"Backup Trigger ({mode})",
+        #    message=(
+        #        f"Backup-Container (Image: {IMAGE_PREFIX}) wurde gestartet "
+        #        f"(Modus: {mode}, ZERO_FILL={env['ZERO_FILL']})."
+        #    ),
+        #    priority=4,
+        #)
 
         try:
             proc = subprocess.run(
