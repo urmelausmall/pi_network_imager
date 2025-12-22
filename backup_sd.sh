@@ -13,6 +13,11 @@ DRY_RUN_FROM_CLI=false
 HEALTH_CHECK=false
 HEALTH_CHECK_FROM_CLI=false
 NON_INTERACTIVE=false
+HEALTHCHECK_OK=true      # Default lieber true, sonst wird am Ende alles "fail"
+IMAGE_PATH=""            # voller Pfad zur Image-Datei
+IMAGE_WRITTEN=false      # wird true, sobald dd wirklich gestartet wurde
+
+MODE_TEXT="Normal"
 
 ZERO_FILL="${ZERO_FILL:-false}"     # optionales Zero-Fill des freien Platzes
 
@@ -59,7 +64,6 @@ BACKUP_NODE_NAME="${BACKUP_NODE_NAME:-}"
 # Status-Flags für sichere Rotation
 BACKUP_SUCCESS=false
 SAFE_TO_ROTATE=true
-HEALTHCHECK_OK=false
 
 # Logging ins MARKER_DIR (falls vorhanden)
 LOG_FILE=""
@@ -97,9 +101,43 @@ log_msg() {
   fi
 }
 
+
+
 # =========================
 # Funktionen
 # =========================
+
+mark_image_written() { IMAGE_WRITTEN=true; }
+
+set_image_path() {
+  # usage: set_image_path "/mnt/syno-backup/xyz.img.gz"
+  IMAGE_PATH="$1"
+}
+
+rename_failed_image_if_needed() {
+  # nur wenn es überhaupt eine Zieldatei gibt
+  [[ -n "${IMAGE_PATH:-}" ]] || return 0
+
+  # nur umbenennen, wenn Backup/Health nicht OK
+  if [[ "${BACKUP_SUCCESS}" != "true" || "${HEALTHCHECK_OK}" != "true" ]]; then
+    :
+  else
+    return 0
+  fi
+
+  if [[ -f "$IMAGE_PATH" ]]; then
+    local ts new_path
+    ts="$(date +%F_%H%M%S)"
+    local base="${IMAGE_PATH%.img.gz}"
+    new_path="${base}.FAILED_${ts}.img.gz"
+
+    [[ "$IMAGE_PATH" == *.FAILED_* ]] && return 0
+
+    log_msg "⚠️ Fehler/Healthfail: Benenne Image um: $(basename "$IMAGE_PATH") -> $(basename "$new_path")"
+    mv -f -- "$IMAGE_PATH" "$new_path" || log_msg "❌ Umbenennen fehlgeschlagen (mv)."
+  fi
+}
+
 
 # Globaler Node-Name (für MQTT & HA-Discovery)
 if [[ -n "$BACKUP_NODE_NAME" ]]; then
@@ -549,6 +587,7 @@ Fertiggestellt (Fehler): ${end_human} (${dur_str})." \
     8
 }
 trap 'on_error' ERR
+trap 'rename_failed_image_if_needed "$?"' EXIT
 
 # -------------------------
 # Systemcheck ausführen
@@ -680,6 +719,7 @@ fi
 # =========================
 DATE_STR="$(date +%F_%H%M)"
 IMAGE_NAME="${IMAGE_PREFIX}${DATE_STR}.img.gz"
+set_image_path "$BACKUP_DIR/$IMAGE_NAME"
 MODE_TEXT="Normal"
 $DRY_RUN && MODE_TEXT="Dry-Run"
 $HEALTH_CHECK && MODE_TEXT="${MODE_TEXT} + Healthcheck"
@@ -887,6 +927,11 @@ fi
 
 df -h "$BACKUP_DIR" || true
 
+
+
+
+
+
 # 2) Docker Stop
 log_msg "[1/5] Stoppe laufende Docker-Container..."
 
@@ -894,10 +939,26 @@ if ! command -v docker &>/dev/null; then
   log_msg "→ Docker nicht installiert, überspringe Container-Stop."
 else
   # Eigenen Container / Name bestimmen
-  SELF_ID=""
-  if [[ -n "${HOSTNAME:-}" ]]; then
-    SELF_ID="$HOSTNAME"  # Standard: Container-ID == HOSTNAME
-  fi
+
+get_self_container_id() {
+  # Versucht aus cgroup eine 64-hex Container-ID zu ziehen (Docker/Containerd)
+  local id
+  id="$(grep -aoE '[0-9a-f]{64}' /proc/1/cgroup 2>/dev/null | head -n1 || true)"
+  echo "$id"
+}
+
+SELF_ID_LONG="$(get_self_container_id)"
+SELF_ID_SHORT=""
+
+if [[ -n "$SELF_ID_LONG" ]]; then
+  SELF_ID_SHORT="${SELF_ID_LONG:0:12}"
+else
+  # Fallback: Hostname (kann id ODER name sein)
+  SELF_ID_SHORT="${HOSTNAME:-}"
+fi
+
+log_msg "DEBUG: SELF_ID_SHORT='${SELF_ID_SHORT}' (from cgroup/hostname)"
+
 
   # Laufende Container holen (Fehler killt das Script NICHT)
   DOCKER_PS_OUTPUT="$(docker ps --format '{{.ID}} {{.Names}}' 2>&1)"
@@ -925,9 +986,15 @@ else
         # führenden / bei Namen entfernen
         cname="${cname#/}"
 
-        # eigenen Backup-Container ignorieren
-        if [[ -n "$SELF_ID" && ( "$cid" == "$SELF_ID" || "$cname" == "$SELF_ID" ) ]]; then
-          log_msg "DEBUG: Ignoriere eigenen Container $cname ($cid) beim Stoppen."
+        # eigenen Backup-Container ignorieren (ID-Prefix-match)
+        if [[ -n "$SELF_ID_SHORT" && "$cid" == "$SELF_ID_SHORT"* ]]; then
+          log_msg "DEBUG: Ignoriere eigenen Container (self) ($cid / $cname) beim Stoppen."
+          continue
+        fi
+
+        # optional zusätzlich: Namen hard-excluden (sicher ist sicher)
+        if [[ "$cname" == *pi-backup* ]]; then
+          log_msg "DEBUG: Ignoriere Backup-Container per Name ($cid / $cname)."
           continue
         fi
 
@@ -1037,6 +1104,7 @@ if $DRY_RUN; then
   touch "$BACKUP_DIR/dry_run_test.txt" && rm "$BACKUP_DIR/dry_run_test.txt"
 
   BACKUP_SUCCESS=true
+  HEALTHCHECK_OK=true
 else
   if [[ "$ZERO_FILL" == "true" ]]; then
     zero_free_space
@@ -1046,6 +1114,7 @@ else
 
   log_msg "[2/5] Erstelle Image von $DEV..."
 echo "[2/5] Erstelle Image von $DEV..."
+mark_image_written
 
 mqtt_publish_retained "status" "$(printf '{"phase":"dd_start","mode":"%s"}' "$MODE_TEXT")"
 mqtt_publish_retained "progress" "$(printf '{"phase":"dd_start","bytes":0,"total":%s,"percent":0}' "$TOTAL_BYTES")"
@@ -1196,6 +1265,12 @@ if $DRY_RUN; then
 else
   log_msg "[4/5] Backup fertig: $BACKUP_DIR/$IMAGE_NAME ✅"
 fi
+
+# Ab hier: Backup ist fertig, Renaming soll nicht mehr durch "Kleinkram" getriggert werden
+# (Nur Healthcheck/Backup-Ergebnis zählt)
+
+rename_failed_image_if_needed
+trap - EXIT
 
 # 6) Unmount
 log_msg "[5/5] Unmount..."
