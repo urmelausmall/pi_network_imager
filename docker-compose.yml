@@ -1,48 +1,46 @@
+version: "3.9"
+
 services:
   pi-backup:
-    image: docker.io/urmelausmall/pinetworkimager:1.97
+    image: deinuser/pi-backup-mainos:latest
     container_name: pi-backup
-    restart: unless-stopped
-    privileged: true               # für dd + mount, pragmatisch
+    restart: always
+    privileged: true      # damit /sbin/reboot den Host rebooten kann
     ports:
-      - "7899:8080"
+      - "8080:8080"       # API nach außen, wenn gewünscht
     environment:
-      BOOT_DEVICE: /dev/sda            # USB-SSD oder /dev/mmcblk0 – SD Karte
-      # ZERO_FILL=true
-      # SKIP_BOOT_MSG: true
+      # wie bisher – kann aus deinem alten Setup übernommen werden:
+      - IMAGE_PREFIX=raspi-4gb-
+      - RETENTION_COUNT=3
 
-      CIFS_SHARE: "//192.168.178.25/System_Backup"
-      CIFS_USER: "User"
-      CIFS_DOMAIN: "WORKGROUP"
-      CIFS_PASS: "Passwort"
+      - CIFS_SHARE=//192.168.178.25/System_Backup
+      - CIFS_USER=User
+      - CIFS_DOMAIN=WORKGROUP
+      - CIFS_PASS=GeheimesPasswort
+      - CIFS_UID=1000
+      - CIFS_GID=1000
 
-      # Backup-Einstellungen
-      IMAGE_PREFIX: "raspi-4gb-"
-      # X Versionen behalten (inkl. aktuelle Sicherung)
-      RETENTION_COUNT: "2"
-      # Delay nach Abschluss des Backups vor Docker restart
-      START_DELAY: "15"
+      - GOTIFY_URL=http://192.168.178.25:6742
+      - GOTIFY_TOKEN=xxxxxxxx
+      - GOTIFY_ENABLED=true
 
-      # Gotify
-      GOTIFY_URL: "http://192.168.178.25:6742"
-      GOTIFY_TOKEN: "xxxxxxxxxxxxx"
-      GOTIFY_ENABLED: "false"
+      - MQTT_ENABLED=true
+      - MQTT_HOST=192.168.178.25
+      - MQTT_PORT=1883
+      - MQTT_USER=
+      - MQTT_PASS=
+      - MQTT_TLS=false
+      - MQTT_DISCOVERY_PREFIX=homeassistant
+      - MQTT_TOPIC_PREFIX=homelab/pi-backup
 
-      # MQTT
-      MQTT_ENABLED: "false"
-      MQTT_HOST: "192.168.178.25"
-      MQTT_PORT: "1883"
-      # MQTT_USER: ""
-      # MQTT_PASS: ""
-      # MQTT_TLS: "false"
-      MQTT_DISCOVERY_PREFIX: "homeassistant"
-      MQTT_TOPIC_PREFIX: "pi-backups/pi-4gb-backup"
-      BACKUP_NODE_NAME: "pi-4gb"
+      - BACKUP_NODE_NAME=raspi-4gb
+      # später: Hinweis für Backup-OS, wie die „richtige“ Platte zu finden ist
+      # - BACKUP_SRC_HINT=LABEL=RASPI_ROOT
 
-      TZ: Europe/Berlin
+      # Pfad im Container (default /backupos_shared, kann auch weggelassen werden)
+      - BACKUP_SHARED_DIR=/backupos_shared
 
     volumes:
-      # optional: Marker-Verzeichnis (First Boot & Abhängikeiten)
-      - /docker/markers:/markers
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /dev:/dev
+      # Shared-Partition mit LABEL=BACKUP_SHARED muss auf dem Host
+      # nach /mnt/backupos_shared gemountet sein
+      - /mnt/backupos_shared:/backupos_shared:rw

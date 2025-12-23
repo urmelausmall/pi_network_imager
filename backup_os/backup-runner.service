@@ -1,0 +1,12 @@
+[Unit]
+Description=Backup Runner (Backup-OS)
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/backup_runner.sh
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

@@ -1,57 +1,44 @@
 #!/usr/bin/env python3
 import os
-import sys
 import json
 import subprocess
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
-from urllib.request import Request, urlopen
-from urllib.error import URLError
 
 HOST = "0.0.0.0"
 PORT = int(os.getenv("API_PORT", "8080"))
 
-GOTIFY_URL = os.getenv("GOTIFY_URL", "")
-GOTIFY_TOKEN = os.getenv("GOTIFY_TOKEN", "")
-GOTIFY_ENABLED = os.getenv("GOTIFY_ENABLED", "true").lower() == "true"
-IMAGE_PREFIX = os.getenv("IMAGE_PREFIX", "PI_IMAGE")
+# Gemeinsames Verzeichnis zum Backup-OS
+SHARED_DIR = os.getenv("BACKUP_SHARED_DIR", "/backupos_shared")
 
+# Optional: Name des Hosts/Nodes
+BACKUP_NODE_NAME = os.getenv("BACKUP_NODE_NAME", "")
 
-def send_gotify(title: str, message: str, priority: int = 5):
-    if not GOTIFY_ENABLED or not GOTIFY_URL or not GOTIFY_TOKEN:
-        return
-    try:
-        data = f"title={title}&message={message}&priority={priority}".encode("utf-8")
-        url = GOTIFY_URL.rstrip("/") + f"/message?token={GOTIFY_TOKEN}"
-        req = Request(url, data=data, method="POST")
-        urlopen(req, timeout=5).read()
-    except URLError:
-        # Silent fail, wir wollen Backup nicht abbrechen, nur weil Gotify nicht erreichbar ist
-        pass
-
+# === Helper: sicheres JSON-Senden (BrokenPipe abfangen) =======================
 
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, code, payload):
-        """Antwort als JSON senden, BrokenPipe sauber weglogggen."""
         try:
+            body = json.dumps(payload).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(json.dumps(payload).encode("utf-8"))
+            self.wfile.write(body)
         except BrokenPipeError:
-            # Client hat die Verbindung schon geschlossen → ist für uns okay
-            print(
-                "[API] Client hat Verbindung beim Senden der Antwort geschlossen (BrokenPipe).",
-                file=sys.stderr,
-                flush=True,
-            )
-        except Exception as e:
-            # Irgendein anderer IO-Fehler – loggen, aber Backup nicht killen
-            print(
-                f"[API] Fehler beim Senden der JSON-Antwort: {e}",
-                file=sys.stderr,
-                flush=True,
-            )
+            # Client hat Verbindung abgebrochen (z.B. durch Reboot) → ignoriere
+            pass
+        except OSError:
+            # Socket ist weg → auch ignorieren
+            pass
+
+    def log_message(self, format, *args):
+        # optional: Standard-Logging von BaseHTTPRequestHandler unterdrücken
+        print("%s - - [%s] %s" %
+              (self.client_address[0],
+               self.log_date_time_string(),
+               format % args),
+              flush=True)
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -59,18 +46,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not_found"})
             return
 
-        # Mode aus Query oder JSON-Body
+        # --- Mode & Zero-Fill aus Query / Body -------------------------------
         mode = None
-
-        # Zero-Fill-Flag, default: False
         zero_fill = False
 
-        # Query-String: /backup?mode=dry-run&zero_fill=true
         qs = parse_qs(parsed.query)
         if "mode" in qs and qs["mode"]:
             mode = qs["mode"][0]
 
-        # zero_fill aus Query übernehmen
         if "zero_fill" in qs and qs["zero_fill"]:
             val = qs["zero_fill"][0].strip().lower()
             if val in ("1", "true", "yes", "on"):
@@ -78,7 +61,6 @@ class Handler(BaseHTTPRequestHandler):
             elif val in ("0", "false", "no", "off"):
                 zero_fill = False
 
-        # JSON-Body optional (kann mode UND zero_fill überschreiben)
         length = int(self.headers.get("Content-Length") or 0)
         if length > 0:
             body = self.rfile.read(length)
@@ -87,24 +69,20 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(data, dict):
                     if "mode" in data:
                         mode = data["mode"]
-
                     if "zero_fill" in data:
                         z = data["zero_fill"]
-                        # bool direkt
                         if isinstance(z, bool):
                             zero_fill = z
-                        # string interpretieren
                         elif isinstance(z, str):
                             val = z.strip().lower()
                             if val in ("1", "true", "yes", "on"):
                                 zero_fill = True
                             elif val in ("0", "false", "no", "off"):
                                 zero_fill = False
-                        # int interpretieren
                         elif isinstance(z, int):
                             zero_fill = (z != 0)
             except Exception:
-                # Body kaputt? Ignorieren, Query-Parameter gelten weiter
+                # Body kaputt → ignorieren, Query bleibt gültig
                 pass
 
         if mode not in ("dry-run", "no-health", "with-health"):
@@ -114,58 +92,112 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        # passenden Command bauen
-        cmd = ["./backup_sd.sh", "--non-interactive"]
+        # Shared-Dir prüfen
+        if not os.path.isdir(SHARED_DIR):
+            self._send_json(500, {
+                "error": "shared_dir_missing",
+                "details": f"{SHARED_DIR} existiert nicht (ist das BACKUP_SHARED Volume gemountet?)"
+            })
+            return
 
-        if mode == "dry-run":
-            cmd += ["--dry-run", "--no-health-check"]
-        elif mode == "no-health":
-            cmd += ["--no-health-check"]
-        elif mode == "with-health":
-            cmd += ["--health-check"]
-
-        # Environment für den Prozess vorbereiten
-        env = os.environ.copy()
-        env["ZERO_FILL"] = "true" if zero_fill else "false"
-
-        # Debug-Info im Container-Log
-        print(f"[API] Starte Backup: mode={mode}, ZERO_FILL={env['ZERO_FILL']}", flush=True)
-
-        # Optional: Gotify-Startmeldung
-        # send_gotify(
-        #     title=f"Backup Trigger ({mode})",
-        #     message=(
-        #         f"Backup-Container (Image: {IMAGE_PREFIX}) wurde gestartet "
-        #         f"(Modus: {mode}, ZERO_FILL={env['ZERO_FILL']})."
-        #     ),
-        #     priority=4,
-        # )
-
+        # --- Backup-Job-Datei schreiben --------------------------------------
         try:
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,   # angepasste Env übergeben
-            )
-            payload = {
-                "mode": mode,
-                "zero_fill": zero_fill,
-                "returncode": proc.returncode,
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
-            }
-            code = 200 if proc.returncode == 0 else 500
-            self._send_json(code, payload)
-        except Exception as e:
-            # Hier nur loggen + 500 versuchen – BrokenPipe wird in _send_json selbst abgefangen
+            os.makedirs(SHARED_DIR, exist_ok=True)
+            request_path = os.path.join(SHARED_DIR, "backup_request.env")
+            flag_path = os.path.join(SHARED_DIR, "backup.flag")
+
+            # alte Status-Datei optional löschen (Backup-OS schreibt später neue)
+            status_env = os.path.join(SHARED_DIR, "backup_status.env")
+            status_json = os.path.join(SHARED_DIR, "backup_status.json")
+            for p in (status_env, status_json):
+                if os.path.exists(p):
+                    os.remove(p)
+
+            env_lines = []
+
+            # Grund-Infos / Modus
+            env_lines.append(f'MODE="{mode}"')
+            env_lines.append(f'ZERO_FILL={"true" if zero_fill else "false"}')
+
+            # Flag für Healthcheck im Backup-OS
+            if mode == "with-health":
+                env_lines.append('HEALTH_CHECK=true')
+            else:
+                env_lines.append('HEALTH_CHECK=false')
+
+            # Node-Name, falls gesetzt
+            if BACKUP_NODE_NAME:
+                env_lines.append(f'BACKUP_NODE_NAME="{BACKUP_NODE_NAME}"')
+
+            # Bestehende Env-Variablen durchreichen (wie im alten Container)
+            passthrough_keys = [
+                "IMAGE_PREFIX",
+                "RETENTION_COUNT",
+                "CIFS_SHARE",
+                "CIFS_USER",
+                "CIFS_DOMAIN",
+                "CIFS_PASS",
+                "CIFS_UID",
+                "CIFS_GID",
+                "GOTIFY_URL",
+                "GOTIFY_TOKEN",
+                "GOTIFY_ENABLED",
+                "MQTT_ENABLED",
+                "MQTT_HOST",
+                "MQTT_PORT",
+                "MQTT_USER",
+                "MQTT_PASS",
+                "MQTT_TLS",
+                "MQTT_DISCOVERY_PREFIX",
+                "MQTT_TOPIC_PREFIX",
+                "BACKUP_SRC_HINT",      # z.B. LABEL=..., PARTUUID=..., DEVICE=/dev/sda
+            ]
+
+            for key in passthrough_keys:
+                val = os.getenv(key)
+                if val is not None:
+                    # einfache Shell-Quote-Variante
+                    safe = val.replace('"', '\\"')
+                    env_lines.append(f'{key}="{safe}"')
+
+            with open(request_path, "w", encoding="utf-8") as f:
+                f.write("# Automatisch vom Haupt-OS-Backup-Container generiert\n")
+                for line in env_lines:
+                    f.write(line + "\n")
+
+            # Flag anlegen → Backup-OS weiß: es gibt einen neuen Job
+            with open(flag_path, "w", encoding="utf-8") as f:
+                f.write("pending\n")
+
             print(
-                f"[API] Unerwarteter Fehler im Backup-Handler: {e}",
-                file=sys.stderr,
-                flush=True,
+                f"[API] Backup-Job geschrieben: mode={mode}, ZERO_FILL={zero_fill}, request={request_path}",
+                flush=True
             )
-            self._send_json(500, {"error": "execution_failed", "details": str(e)})
+
+        except Exception as e:
+            self._send_json(500, {
+                "error": "write_failed",
+                "details": str(e),
+            })
+            return
+
+        # --- Antwort an Client schicken, bevor wir rebooten ------------------
+        self._send_json(200, {
+            "status": "backup_scheduled",
+            "mode": mode,
+            "zero_fill": zero_fill,
+            "shared_dir": SHARED_DIR,
+        })
+
+        # --- Reboot im Hintergrund anstoßen ----------------------------------
+        try:
+            # Host rebooten – Container muss mit Privilegien laufen
+            subprocess.Popen(["/sbin/reboot", "now"])
+            print("[API] Reboot wurde angestoßen.", flush=True)
+        except FileNotFoundError:
+            print("[API] WARN: /sbin/reboot nicht gefunden – bitte auf dem Host prüfen.", flush=True)
+        except Exception as e:
+            print(f"[API] Reboot-Fehler: {e}", flush=True)
 
 
 def main():
