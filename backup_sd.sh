@@ -117,26 +117,37 @@ set_image_path() {
 rename_failed_image_if_needed() {
   # nur wenn es überhaupt eine Zieldatei gibt
   [[ -n "${IMAGE_PATH:-}" ]] || return 0
+  [[ -f "$IMAGE_PATH" ]] || return 0
 
-  # nur umbenennen, wenn Backup/Health nicht OK
-  if [[ "${BACKUP_SUCCESS}" != "true" || "${HEALTHCHECK_OK}" != "true" ]]; then
-    :
+  local reason=""
+  local suffix=""
+  local ts base new_path
+
+  # Priorität: Schreibfehler > Healthcheck-Fehler
+  if [[ "${BACKUP_SUCCESS}" != "true" ]]; then
+    suffix="FAILED"
+    reason="Backup-Schreibfehler (dd/pigz o.ä.)"
+  elif [[ "${HEALTHCHECK_OK}" != "true" ]]; then
+    suffix="UNHEALTHY"
+    reason="Healthcheck NIO (Archiv korrupt?)"
   else
+    # alles gut, nichts umbenennen
     return 0
   fi
 
-  if [[ -f "$IMAGE_PATH" ]]; then
-    local ts new_path
-    ts="$(date +%F_%H%M%S)"
-    local base="${IMAGE_PATH%.img.gz}"
-    new_path="${base}.FAILED_${ts}.img.gz"
+  # Wenn bereits mit FAILED_/UNHEALTHY_ versehen → nicht nochmal anfassen
+  case "$IMAGE_PATH" in
+    *.FAILED_*|*.UNHEALTHY_*) return 0 ;;
+  esac
 
-    [[ "$IMAGE_PATH" == *.FAILED_* ]] && return 0
+  ts="$(date +%F_%H%M%S)"
+  base="${IMAGE_PATH%.img.gz}"
+  new_path="${base}.${suffix}_${ts}.img.gz"
 
-    log_msg "⚠️ Fehler/Healthfail: Benenne Image um: $(basename "$IMAGE_PATH") -> $(basename "$new_path")"
-    mv -f -- "$IMAGE_PATH" "$new_path" || log_msg "❌ Umbenennen fehlgeschlagen (mv)."
-  fi
+  log_msg "⚠️ ${reason}: Benenne Image um: $(basename "$IMAGE_PATH") -> $(basename "$new_path")"
+  mv -f -- "$IMAGE_PATH" "$new_path" || log_msg "❌ Umbenennen fehlgeschlagen (mv)."
 }
+
 
 
 # Globaler Node-Name (für MQTT & HA-Discovery)

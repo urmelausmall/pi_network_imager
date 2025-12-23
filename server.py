@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import sys
 import json
 import subprocess
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -14,6 +15,7 @@ GOTIFY_URL = os.getenv("GOTIFY_URL", "")
 GOTIFY_TOKEN = os.getenv("GOTIFY_TOKEN", "")
 GOTIFY_ENABLED = os.getenv("GOTIFY_ENABLED", "true").lower() == "true"
 IMAGE_PREFIX = os.getenv("IMAGE_PREFIX", "PI_IMAGE")
+
 
 def send_gotify(title: str, message: str, priority: int = 5):
     if not GOTIFY_ENABLED or not GOTIFY_URL or not GOTIFY_TOKEN:
@@ -30,21 +32,37 @@ def send_gotify(title: str, message: str, priority: int = 5):
 
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, code, payload):
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(payload).encode("utf-8"))
+        """Antwort als JSON senden, BrokenPipe sauber weglogggen."""
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(payload).encode("utf-8"))
+        except BrokenPipeError:
+            # Client hat die Verbindung schon geschlossen → ist für uns okay
+            print(
+                "[API] Client hat Verbindung beim Senden der Antwort geschlossen (BrokenPipe).",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception as e:
+            # Irgendein anderer IO-Fehler – loggen, aber Backup nicht killen
+            print(
+                f"[API] Fehler beim Senden der JSON-Antwort: {e}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def do_POST(self):
         parsed = urlparse(self.path)
         if parsed.path != "/backup":
-          self._send_json(404, {"error": "not_found"})
-          return
+            self._send_json(404, {"error": "not_found"})
+            return
 
         # Mode aus Query oder JSON-Body
         mode = None
 
-        # >>> Zero-Fill-Flag, default: False
+        # Zero-Fill-Flag, default: False
         zero_fill = False
 
         # Query-String: /backup?mode=dry-run&zero_fill=true
@@ -106,22 +124,22 @@ class Handler(BaseHTTPRequestHandler):
         elif mode == "with-health":
             cmd += ["--health-check"]
 
-        # >>> Environment für den Prozess vorbereiten
+        # Environment für den Prozess vorbereiten
         env = os.environ.copy()
         env["ZERO_FILL"] = "true" if zero_fill else "false"
 
-        # Optional: kleine Debug-Info im Log
+        # Debug-Info im Container-Log
         print(f"[API] Starte Backup: mode={mode}, ZERO_FILL={env['ZERO_FILL']}", flush=True)
 
-        # Gotify-Startmeldung
-        #send_gotify(
-        #    title=f"Backup Trigger ({mode})",
-        #    message=(
-        #        f"Backup-Container (Image: {IMAGE_PREFIX}) wurde gestartet "
-        #        f"(Modus: {mode}, ZERO_FILL={env['ZERO_FILL']})."
-        #    ),
-        #    priority=4,
-        #)
+        # Optional: Gotify-Startmeldung
+        # send_gotify(
+        #     title=f"Backup Trigger ({mode})",
+        #     message=(
+        #         f"Backup-Container (Image: {IMAGE_PREFIX}) wurde gestartet "
+        #         f"(Modus: {mode}, ZERO_FILL={env['ZERO_FILL']})."
+        #     ),
+        #     priority=4,
+        # )
 
         try:
             proc = subprocess.run(
@@ -129,7 +147,7 @@ class Handler(BaseHTTPRequestHandler):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=env,   # <<< HIER wichtig: angepasste Env übergeben
+                env=env,   # angepasste Env übergeben
             )
             payload = {
                 "mode": mode,
@@ -141,6 +159,12 @@ class Handler(BaseHTTPRequestHandler):
             code = 200 if proc.returncode == 0 else 500
             self._send_json(code, payload)
         except Exception as e:
+            # Hier nur loggen + 500 versuchen – BrokenPipe wird in _send_json selbst abgefangen
+            print(
+                f"[API] Unerwarteter Fehler im Backup-Handler: {e}",
+                file=sys.stderr,
+                flush=True,
+            )
             self._send_json(500, {"error": "execution_failed", "details": str(e)})
 
 
