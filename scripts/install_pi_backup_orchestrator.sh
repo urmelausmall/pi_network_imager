@@ -23,6 +23,74 @@ install_deps() {
     curl pigz gzip cifs-utils mosquitto-clients util-linux
 }
 
+ensure_bootorder_allows_sd() {
+  echo "[setup] Prüfe Raspberry Pi Bootloader (EEPROM) Boot-Order..."
+
+  if ! command -v vcgencmd >/dev/null 2>&1; then
+    echo "[setup] WARN: vcgencmd nicht gefunden (raspi utils fehlen?) – überspringe Boot-Order Check."
+    return 0
+  fi
+
+  local cfg
+  cfg="$(vcgencmd bootloader_config 2>/dev/null || true)"
+  if [[ -z "$cfg" ]]; then
+    echo "[setup] WARN: Konnte bootloader_config nicht lesen – überspringe."
+    return 0
+  fi
+
+  local current
+  current="$(echo "$cfg" | awk -F= '/^[[:space:]]*BOOT_ORDER=/{gsub(/[[:space:]]/,"",$2); print $2; exit}')"
+
+  if [[ -z "$current" ]]; then
+    echo "[setup] WARN: BOOT_ORDER nicht gefunden – überspringe."
+    return 0
+  fi
+
+  echo "[setup] Aktueller BOOT_ORDER: ${current}"
+
+  # Wir wollen SD (0x1) vor USB (0x4) irgendwo in der Order haben.
+  # Falls SD gar nicht drin ist oder nach USB kommt, setzen wir auf 0x14 (SD->USB).
+  # (0x14 = 0x1 dann 0x4; Pi versucht SD, sonst USB.)
+  # Hinweis: Manche Systeme nutzen zusätzlich 0xf.. für Retry – das ist okay, aber hier minimal/robust.
+  local desired="0x14"
+
+  # Heuristik: wenn current bereits mit 0x1... beginnt oder 0x14 enthält -> ok
+  if [[ "${current,,}" == 0x1* ]] || [[ "${current,,}" == *14* ]]; then
+    echo "[setup] BOOT_ORDER scheint SD->USB bereits zu erlauben – OK."
+    return 0
+  fi
+
+  echo "[setup] Setze BOOT_ORDER auf ${desired} (SD -> USB)..."
+
+  if ! command -v rpi-eeprom-config >/dev/null 2>&1; then
+    echo "[setup] WARN: rpi-eeprom-config fehlt – installiere raspberrypi-eeprom?"
+    return 0
+  fi
+
+  # EEPROM Config read -> modify -> apply
+  local tmp_in tmp_out
+  tmp_in="$(mktemp)"
+  tmp_out="$(mktemp)"
+  trap 'rm -f "$tmp_in" "$tmp_out"' RETURN
+
+  rpi-eeprom-config > "$tmp_in"
+
+  if grep -qE '^[#[:space:]]*BOOT_ORDER=' "$tmp_in"; then
+    sed -E 's|^[#[:space:]]*BOOT_ORDER=.*|BOOT_ORDER='"${desired}"'|g' "$tmp_in" > "$tmp_out"
+  else
+    cat "$tmp_in" > "$tmp_out"
+    echo "BOOT_ORDER=${desired}" >> "$tmp_out"
+  fi
+
+  # Apply
+  if rpi-eeprom-config --apply "$tmp_out"; then
+    echo "[setup] EEPROM Update eingeplant. Reboot erforderlich."
+  else
+    echo "[setup] WARN: EEPROM Apply fehlgeschlagen. Bitte manuell prüfen."
+    return 0
+  fi
+}
+
 setup_backup_shared_mount_mainos() {
   local LABEL_NAME="BACKUP_SHARED"
   local MOUNT_POINT="/backupos_shared"
@@ -461,6 +529,7 @@ main() {
   write_orchestrator
   write_service
   disable_old_units
+  ensure_bootorder_allows_sd
   enable_service
   echo "[setup] Fertig."
   echo "Logs: journalctl -u pi-backup-orchestrator.service -f"
