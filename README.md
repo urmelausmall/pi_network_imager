@@ -8,21 +8,8 @@ docker buildx build \
   --push \
   .
 
-############################################
 
-sudo mkdir -p /backupos_shared
-sudo nano /etc/fstab
 
-  LABEL=BACKUP_SHARED  /backupos_shared  ext4  defaults,nofail  0  2
-
-sudo mount -a
-ls /backupos_shared
-
-############################################
-
-sudo nano /usr/local/sbin/pi-backup-reboot-watcher.sh
-
-############################################
 
 # /etc/systemd/system/pi-backup-reboot-watcher.service
 

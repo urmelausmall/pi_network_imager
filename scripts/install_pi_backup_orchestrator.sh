@@ -23,6 +23,49 @@ install_deps() {
     curl pigz gzip cifs-utils mosquitto-clients util-linux
 }
 
+setup_backup_shared_mount_mainos() {
+  local LABEL_NAME="BACKUP_SHARED"
+  local MOUNT_POINT="/backupos_shared"
+  local FSTAB_LINE="LABEL=${LABEL_NAME}  ${MOUNT_POINT}  ext4  defaults,nofail,x-systemd.automount  0  2"
+
+  echo "[setup] Shared-Mount im Main-OS vorbereiten (${LABEL_NAME} -> ${MOUNT_POINT})..."
+
+  mkdir -p "$MOUNT_POINT"
+
+  # 1) Prüfen ob Label im System sichtbar ist
+  if ! blkid -L "$LABEL_NAME" >/dev/null 2>&1; then
+    echo "[setup] WARN: LABEL=${LABEL_NAME} aktuell nicht sichtbar."
+    echo "[setup]       - Ist das BACKUP_SHARED Volume angeschlossen?"
+    echo "[setup]       - Falls es per USB-Platte kommt: ist die Platte gemountet/da?"
+    echo "[setup]       Ich trage trotzdem fstab ein (nofail), dann klappt es später automatisch."
+  fi
+
+  # 2) fstab-Eintrag nur hinzufügen, wenn nicht vorhanden
+  if grep -qE "^[^#]*LABEL=${LABEL_NAME}[[:space:]]+${MOUNT_POINT}" /etc/fstab; then
+    echo "[setup] fstab-Eintrag existiert bereits."
+  else
+    echo "[setup] Ergänze /etc/fstab..."
+    echo "$FSTAB_LINE" >> /etc/fstab
+  fi
+
+  # 3) systemd + mount testen (ohne Boot zu riskieren)
+  systemctl daemon-reload || true
+
+  if mountpoint -q "$MOUNT_POINT"; then
+    echo "[setup] ${MOUNT_POINT} ist bereits gemountet."
+  else
+    echo "[setup] Teste Mount via mount -a (nofail => kein Hard-Fail)..."
+    mount -a || true
+  fi
+
+  # 4) Ausgabe
+  if mountpoint -q "$MOUNT_POINT"; then
+    echo "[setup] OK: Shared-Mount aktiv: ${MOUNT_POINT}"
+  else
+    echo "[setup] Hinweis: Shared-Mount nicht aktiv (noch nicht verfügbar) – wird automatisch gemountet sobald Device da ist."
+  fi
+}
+
 write_orchestrator() {
   echo "[setup] Schreibe Orchestrator nach ${ORCH_PATH}..."
 
@@ -414,6 +457,7 @@ enable_service() {
 main() {
   need_root
   install_deps
+  setup_backup_shared_mount_mainos
   write_orchestrator
   write_service
   disable_old_units
