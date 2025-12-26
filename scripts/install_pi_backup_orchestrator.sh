@@ -1,0 +1,421 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ORCH_PATH="/usr/local/sbin/pi-backup-orchestrator.sh"
+SERVICE_PATH="/etc/systemd/system/pi-backup-orchestrator.service"
+
+# Optional: alte Unit(s), die du früher hattest
+OLD_UNITS=(
+  "pi-backup-reboot-watcher.service"
+)
+
+need_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    echo "Bitte als root ausführen: sudo $0"
+    exit 1
+  fi
+}
+
+install_deps() {
+  echo "[setup] Installiere Abhängigkeiten..."
+  apt-get update
+  apt-get install -y --no-install-recommends \
+    curl pigz gzip cifs-utils mosquitto-clients util-linux
+}
+
+write_orchestrator() {
+  echo "[setup] Schreibe Orchestrator nach ${ORCH_PATH}..."
+
+  cat > "$ORCH_PATH" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ============================================================
+# Pi Backup Orchestrator (Main-OS) - v2 (patched)
+# ============================================================
+
+SHARED_DIR="${SHARED_DIR:-/backupos_shared}"
+
+BACKUP_FLAG="${SHARED_DIR}/backup.flag"
+BACKUP_REQ="${SHARED_DIR}/backup_request.env"
+BACKUP_STATUS_ENV="${SHARED_DIR}/backup_status.env"
+BACKUP_STATUS_JSON="${SHARED_DIR}/backup_status.json"
+
+SD_FLAG="${SHARED_DIR}/sdimage.flag"
+SD_REQ="${SHARED_DIR}/sdimage_request.env"
+SD_STATUS_ENV="${SHARED_DIR}/sdimage_status.env"
+SD_STATUS_JSON="${SHARED_DIR}/sdimage_status.json"
+
+GUARD_FILE="${SHARED_DIR}/last_host_reboot.ts"
+MIN_REBOOT_INTERVAL_SEC="${MIN_REBOOT_INTERVAL_SEC:-300}"
+
+SD_BOOT_MNT="${SD_BOOT_MNT:-/mnt/sdboot}"
+BOOT_OS_TAG="${BOOT_OS_TAG:-[Boot_OS]}"
+CLEANUP_REQUEST_ON_COMPLETE="${CLEANUP_REQUEST_ON_COMPLETE:-false}"
+
+log(){ echo "[$(date '+%F %T')] [orchestrator] $*" >&2; }
+
+flag_state() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo ""; return 0; }
+  head -n1 "$f" 2>/dev/null | tr -d '\r' | awk '{print $1}'
+}
+
+write_flag() {
+  local f="$1" v="$2"
+  echo "$v" > "$f" 2>/dev/null || true
+  sync
+}
+
+format_duration() {
+  local secs="$1"
+  local h=$((secs / 3600))
+  local m=$(((secs % 3600) / 60))
+  local s=$((secs % 60))
+  if (( h > 0 )); then printf "%d Std %d Min" "$h" "$m"
+  elif (( m > 0 )); then printf "%d Min %d Sek" "$m" "$s"
+  else printf "%d Sek" "$s"
+  fi
+}
+
+notify_gotify() {
+  local title="$1"
+  local message="$2"
+  local priority="${3:-5}"
+
+  [[ "${GOTIFY_ENABLED:-true}" == "true" ]] || return 0
+  [[ -n "${GOTIFY_URL:-}" && -n "${GOTIFY_TOKEN:-}" ]] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+
+  curl -sS -X POST "${GOTIFY_URL%/}/message?token=${GOTIFY_TOKEN}" \
+    -F "title=${title}" \
+    -F "message=${message}" \
+    -F "priority=${priority}" \
+    >/dev/null || true
+}
+
+mqtt_publish_retained() {
+  local topic="$1"
+  local payload="$2"
+  [[ "${MQTT_ENABLED:-false}" == "true" ]] || return 0
+  command -v mosquitto_pub >/dev/null 2>&1 || return 0
+
+  local host="${MQTT_HOST:-127.0.0.1}"
+  local port="${MQTT_PORT:-1883}"
+  local user="${MQTT_USER:-}"
+  local pass="${MQTT_PASS:-}"
+  local tls="${MQTT_TLS:-false}"
+
+  local args=(-h "$host" -p "$port" -t "$topic" -m "$payload" -r)
+  [[ -n "$user" ]] && args+=( -u "$user" )
+  [[ -n "$pass" ]] && args+=( -P "$pass" )
+  [[ "${tls,,}" == "true" ]] && args+=( --tls-version tlsv1.2 )
+
+  mosquitto_pub "${args[@]}" >/dev/null 2>&1 || true
+}
+
+node_name() {
+  if [[ -n "${BACKUP_NODE_NAME:-}" ]]; then
+    echo "$BACKUP_NODE_NAME"
+  else
+    hostname
+  fi
+}
+
+load_req_env() {
+  local req="$1"
+  set -a
+  # shellcheck source=/dev/null
+  source "$req"
+  set +a
+}
+
+enable_sd_boot() {
+  mkdir -p "$SD_BOOT_MNT"
+  local sd_boot_dev
+  sd_boot_dev="$(lsblk -rpno NAME,FSTYPE | awk '$2=="vfat" && $1 ~ /\/dev\/mmcblk[0-9]+p[0-9]+$/ {print $1}' | head -n1)"
+  [[ -n "$sd_boot_dev" ]] || { log "ERROR: No SD boot partition found."; return 1; }
+
+  mount "$sd_boot_dev" "$SD_BOOT_MNT"
+  local f="${SD_BOOT_MNT}/start4.elf"
+  local fd="${SD_BOOT_MNT}/start4.elf.disabled"
+
+  if [[ -f "$fd" ]]; then
+    mv "$fd" "$f"
+    log "SD boot enabled (start4.elf)."
+  else
+    log "SD boot already enabled."
+  fi
+
+  sync
+  umount "$SD_BOOT_MNT"
+}
+
+strip_mainos_tag() { echo "$1" | sed -E 's/\[MAIN-OS\]//Ig'; }
+normalize_prefix_trailing_underscores() { echo "$1" | sed -E 's/[[:space:]]+//g; s/_+$//'; }
+
+run_sdimage_job() {
+  local req_file="$1" flag_file="$2"
+  local start_ts end_ts dur dur_str end_human
+  start_ts="$(date +%s)"
+
+  write_flag "$flag_file" "running"
+  load_req_env "$req_file"
+
+  local NODE; NODE="$(node_name)"
+
+  local BACKUP_DIR="${BACKUP_DIR:-/mnt/syno-backup}"
+  local IMAGE_PREFIX="${IMAGE_PREFIX:-raspi-}"
+  local RETENTION_COUNT="${RETENTION_COUNT:-3}"
+
+  local CIFS_SHARE="${CIFS_SHARE:-}"
+  local CIFS_USER="${CIFS_USER:-User}"
+  local CIFS_DOMAIN="${CIFS_DOMAIN:-WORKGROUP}"
+  local CIFS_PASS="${CIFS_PASS:-}"
+  local CIFS_UID="${CIFS_UID:-1000}"
+  local CIFS_GID="${CIFS_GID:-1000}"
+
+  local MODE="${MODE:-no-health}"
+  local DRY_RUN=false
+  [[ "$MODE" == "dry-run" ]] && DRY_RUN=true
+
+  IMAGE_PREFIX="$(strip_mainos_tag "$IMAGE_PREFIX")"
+  IMAGE_PREFIX="$(normalize_prefix_trailing_underscores "$IMAGE_PREFIX")"
+  IMAGE_PREFIX="${IMAGE_PREFIX}_${BOOT_OS_TAG}_"
+
+  rm -f "$SD_STATUS_ENV" "$SD_STATUS_JSON" 2>/dev/null || true
+
+  local SD_DEV
+  SD_DEV="$(lsblk -rpno NAME,TYPE | awk '$2=="disk" && $1 ~ /\/dev\/mmcblk[0-9]+$/ {print $1}' | head -n1)"
+  [[ -n "$SD_DEV" ]] || { write_flag "$flag_file" "failed"; return 1; }
+
+  local ZIP_CMD=""
+  if command -v pigz >/dev/null 2>&1; then ZIP_CMD="pigz"
+  elif command -v gzip >/dev/null 2>&1; then ZIP_CMD="gzip"
+  else write_flag "$flag_file" "failed"; return 1
+  fi
+
+  mkdir -p "$BACKUP_DIR"
+  if ! mountpoint -q "$BACKUP_DIR"; then
+    [[ -n "$CIFS_SHARE" && -n "$CIFS_PASS" ]] || { write_flag "$flag_file" "failed"; return 1; }
+    local opts="username=${CIFS_USER},password=${CIFS_PASS},domain=${CIFS_DOMAIN},uid=${CIFS_UID},gid=${CIFS_GID},iocharset=utf8,vers=3.0,_netdev"
+    mount -t cifs "$CIFS_SHARE" "$BACKUP_DIR" -o "$opts" || { write_flag "$flag_file" "failed"; return 1; }
+  fi
+
+  local date_str image_name image_path
+  date_str="$(date +%F_%H%M)"
+  image_name="${IMAGE_PREFIX}${date_str}.img.gz"
+  image_path="${BACKUP_DIR}/${image_name}"
+
+  notify_gotify "SD-Backup startet (${NODE})" \
+"Modus: ${MODE}
+Quelle: ${SD_DEV}
+Ziel: ${CIFS_SHARE}/${image_name}" 4
+
+  if [[ "${MQTT_ENABLED:-false}" == "true" ]]; then
+    local base="${MQTT_TOPIC_PREFIX:-pi-backups}/${NODE}"
+    mqtt_publish_retained "${base}/sdimage/status" "{\"phase\":\"starting\",\"mode\":\"${MODE}\",\"image\":\"${image_name}\"}"
+  fi
+
+  if $DRY_RUN; then
+    sleep 2
+  else
+    set +e
+    dd if="$SD_DEV" bs=4M status=progress | "$ZIP_CMD" > "$image_path"
+    local rc=$?
+    set -e
+    if (( rc != 0 )); then
+      umount "$BACKUP_DIR" 2>/dev/null || true
+      write_flag "$flag_file" "failed"
+      notify_gotify "SD-Backup FEHLER (${NODE})" \
+"dd/${ZIP_CMD} fehlgeschlagen (rc=${rc})
+Image: ${CIFS_SHARE}/${image_name}" 8
+      return 1
+    fi
+    sync
+  fi
+
+  umount "$BACKUP_DIR" 2>/dev/null || true
+  end_ts="$(date +%s)"
+  dur=$(( end_ts - start_ts ))
+  dur_str="$(format_duration "$dur")"
+  end_human="$(date '+%d.%m.%Y %H:%M')"
+
+  {
+    echo "STATE=success"
+    echo "MODE=${MODE}"
+    echo "FINISHED_AT=\"${end_human}\""
+    echo "DURATION=\"${dur_str}\""
+    echo "SECONDS=${dur}"
+    echo "IMAGE=\"${image_name}\""
+  } > "$SD_STATUS_ENV" || true
+
+  write_flag "$flag_file" "success"
+
+  notify_gotify "SD-Backup fertig (${NODE})" \
+"Modus: ${MODE}
+Dauer: ${dur_str}
+Fertig: ${end_human}
+Image: ${CIFS_SHARE}/${image_name}" 5
+}
+
+handle_completed_job() {
+  local kind="$1" flag="$2" req="$3" status_env="$4"
+  local st; st="$(flag_state "$flag")"
+  [[ "$st" == "success" || "$st" == "failed" || "$st" == "unhealthy" ]] || return 0
+
+  [[ -f "$req" ]] && load_req_env "$req"
+  local NODE; NODE="$(node_name)"
+
+  local finished_at duration mode image reason exit_code
+  finished_at=""; duration=""; mode=""; image=""; reason=""; exit_code=""
+  if [[ -f "$status_env" ]]; then
+    # shellcheck disable=SC1090
+    source "$status_env" 2>/dev/null || true
+    finished_at="${FINISHED_AT:-}"
+    duration="${DURATION:-}"
+    mode="${MODE:-}"
+    image="${IMAGE:-}"
+    reason="${REASON:-}"
+    exit_code="${EXIT_CODE:-}"
+  fi
+
+  local title_prefix="SD-Backup"
+  [[ "$kind" == "usb" ]] && title_prefix="USB-Backup"
+
+  local prio=5
+  [[ "$st" != "success" ]] && prio=8
+
+  local image_line=""
+  if [[ -n "${CIFS_SHARE:-}" && -n "$image" ]]; then
+    image_line="Image: ${CIFS_SHARE}/${image}"
+  elif [[ -n "$image" ]]; then
+    image_line="Image: ${image}"
+  fi
+
+  local msg
+  msg="$(printf "%s\n%s%s%s%s%s%s" \
+    "State: ${st}" \
+    "${mode:+Modus: ${mode}\n}" \
+    "${duration:+Dauer: ${duration}\n}" \
+    "${finished_at:+Fertig: ${finished_at}\n}" \
+    "${reason:+Reason: ${reason}\n}" \
+    "${exit_code:+Exit: ${exit_code}\n}" \
+    "${image_line:+${image_line}}"
+  )"
+
+  notify_gotify "${title_prefix} abgeschlossen (${NODE})" "$msg" "$prio"
+
+  rm -f "$flag" 2>/dev/null || true
+  if [[ "${CLEANUP_REQUEST_ON_COMPLETE}" == "true" ]]; then
+    rm -f "$req" 2>/dev/null || true
+  fi
+  sync
+}
+
+handle_pending_usb_job() {
+  local st; st="$(flag_state "$BACKUP_FLAG")"
+  [[ "$st" == "pending" && -f "$BACKUP_REQ" ]] || return 0
+
+  load_req_env "$BACKUP_REQ"
+  local NODE; NODE="$(node_name)"
+  local MODE="${MODE:-no-health}"
+
+  local now_ts; now_ts="$(date +%s)"
+  if [[ -f "$GUARD_FILE" ]]; then
+    local last_ts diff
+    last_ts="$(cat "$GUARD_FILE" 2>/dev/null || echo 0)"
+    if [[ "$last_ts" =~ ^[0-9]+$ ]]; then
+      diff=$(( now_ts - last_ts ))
+      (( diff < MIN_REBOOT_INTERVAL_SEC )) && return 0
+    fi
+  fi
+  echo "$now_ts" > "$GUARD_FILE" || true
+
+  write_flag "$BACKUP_FLAG" "running"
+
+  notify_gotify "USB-Backup startet (${NODE})" \
+"Modus: ${MODE}
+Wechsle in ${BOOT_OS_TAG} und starte Backup..." 4
+
+  enable_sd_boot || true
+  sync
+  sleep 2
+  reboot || /usr/sbin/reboot || /sbin/reboot
+  exit 0
+}
+
+log "Start, SHARED_DIR=${SHARED_DIR}"
+while true; do
+  handle_completed_job "sd"  "$SD_FLAG"     "$SD_REQ"     "$SD_STATUS_ENV"
+  handle_completed_job "usb" "$BACKUP_FLAG" "$BACKUP_REQ" "$BACKUP_STATUS_ENV"
+
+  sd_state="$(flag_state "$SD_FLAG")"
+  if [[ "$sd_state" == "pending" && -f "$SD_REQ" ]]; then
+    log "SD job pending -> run locally"
+    run_sdimage_job "$SD_REQ" "$SD_FLAG" || true
+    sleep 2
+    continue
+  fi
+
+  handle_pending_usb_job
+  sleep 3
+done
+EOF
+
+  sed -i 's/\r$//' "$ORCH_PATH"
+  chown root:root "$ORCH_PATH"
+  chmod 755 "$ORCH_PATH"
+}
+
+write_service() {
+  echo "[setup] Schreibe systemd Service nach ${SERVICE_PATH}..."
+  cat > "$SERVICE_PATH" <<EOF
+[Unit]
+Description=Pi Backup Orchestrator (Main-OS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${ORCH_PATH}
+Restart=always
+RestartSec=3
+
+Environment=SHARED_DIR=/backupos_shared
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+disable_old_units() {
+  for u in "${OLD_UNITS[@]}"; do
+    if systemctl list-unit-files | grep -q "^${u}"; then
+      echo "[setup] Deaktiviere alte Unit: $u"
+      systemctl disable --now "$u" || true
+      rm -f "/etc/systemd/system/${u}" "/etc/systemd/system/multi-user.target.wants/${u}" || true
+    fi
+  done
+}
+
+enable_service() {
+  echo "[setup] systemd reload + enable/start..."
+  systemctl daemon-reload
+  systemctl enable --now pi-backup-orchestrator.service
+  systemctl reset-failed || true
+  systemctl status pi-backup-orchestrator.service --no-pager || true
+}
+
+main() {
+  need_root
+  install_deps
+  write_orchestrator
+  write_service
+  disable_old_units
+  enable_service
+  echo "[setup] Fertig."
+  echo "Logs: journalctl -u pi-backup-orchestrator.service -f"
+}
+
+main "$@"
