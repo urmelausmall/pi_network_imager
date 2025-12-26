@@ -1,46 +1,132 @@
-version: "3.9"
-
 services:
   pi-backup:
-    image: deinuser/pi-backup-mainos:latest
+    image: docker.io/urmelausmall/pinetworkimager:latest
+    # ↑ Container-Image für die Backup-API
+    # ↑ Enthält NICHT das Backup-OS selbst,
+    # ↑ sondern nur die Steuer- / API-Logik
+
     container_name: pi-backup
+    # ↑ Name des Containers (frei wählbar)
+
     restart: always
-    privileged: true      # damit /sbin/reboot den Host rebooten kann
+    # ↑ Container automatisch neu starten
+    # ↑ Empfohlen für dauerhaft verfügbare Backup-API
+
     ports:
-      - "8080:8080"       # API nach außen, wenn gewünscht
-    environment:
-      # wie bisher – kann aus deinem alten Setup übernommen werden:
-      - IMAGE_PREFIX=raspi-4gb-
-      - RETENTION_COUNT=3
-
-      - CIFS_SHARE=//192.168.178.25/System_Backup
-      - CIFS_USER=User
-      - CIFS_DOMAIN=WORKGROUP
-      - CIFS_PASS=GeheimesPasswort
-      - CIFS_UID=1000
-      - CIFS_GID=1000
-
-      - GOTIFY_URL=http://192.168.178.25:6742
-      - GOTIFY_TOKEN=xxxxxxxx
-      - GOTIFY_ENABLED=true
-
-      - MQTT_ENABLED=true
-      - MQTT_HOST=192.168.178.25
-      - MQTT_PORT=1883
-      - MQTT_USER=
-      - MQTT_PASS=
-      - MQTT_TLS=false
-      - MQTT_DISCOVERY_PREFIX=homeassistant
-      - MQTT_TOPIC_PREFIX=homelab/pi-backup
-
-      - BACKUP_NODE_NAME=raspi-4gb
-      # später: Hinweis für Backup-OS, wie die „richtige“ Platte zu finden ist
-      # - BACKUP_SRC_HINT=LABEL=RASPI_ROOT
-
-      # Pfad im Container (default /backupos_shared, kann auch weggelassen werden)
-      - BACKUP_SHARED_DIR=/backupos_shared
+      - "7899:8080"
+      # ↑ Links: Port auf dem Host (bei Bedarf ändern)
+      # ↑ Rechts: Interner API-Port (nicht ändern)
 
     volumes:
-      # Shared-Partition mit LABEL=BACKUP_SHARED muss auf dem Host
-      # nach /mnt/backupos_shared gemountet sein
-      - /mnt/backupos_shared:/backupos_shared:rw
+      - /backupos_shared:/backupos_shared
+      # ↑ Gemeinsames Verzeichnis zwischen Haupt-OS & Backup-OS
+      # ↑ Host-Pfad links ggf. anpassen
+      # ↑ Pfad IM Container nicht ändern
+
+    environment:
+      # =========================
+      # Allgemeine Einstellungen
+      # =========================
+
+      BACKUP_SHARED_DIR: /backupos_shared
+      # ↑ Muss exakt zum Volume-Mount passen
+      # ↑ Wird genutzt für Request-, Status- & Log-Dateien
+
+      BACKUP_NODE_NAME: "pi-8gb"
+      # ↑ Frei wählbarer Name dieses Systems
+      # ↑ Wird genutzt in:
+      #   - Log-Ausgaben
+      #   - MQTT / Home Assistant
+      #   - Gotify-Nachrichten
+      #   - Backup-Dateinamen
+
+      # =========================
+      # QUELLE – was wird gesichert?
+      # =========================
+
+      BACKUP_SRC_HINT: "DEVICE=/dev/sda"
+      # ↑ GANZ WICHTIG
+      # ↑ Das physische Laufwerk, das gesichert werden soll
+      # ↑ Beispiele:
+      #   DEVICE=/dev/sda
+      #   DEVICE=/dev/sdb
+      #   DEVICE=/dev/mmcblk0
+      # ↑ Vorher unbedingt prüfen mit:
+      #   lsblk
+      #   blkid
+
+      # =========================
+      # IMAGE / AUFBEWAHRUNG
+      # =========================
+
+      IMAGE_PREFIX: "raspi-8gb-"
+      # ↑ Präfix für den Backup-Dateinamen
+      # ↑ Beispiel:
+      #   raspi-8gb-2025-12-24_0130.img.gz
+      # ↑ Sollte zum Node-Namen passen
+
+      RETENTION_COUNT: "3"
+      # ↑ Anzahl der Backups, die behalten werden
+      # ↑ Ältere Images werden automatisch gelöscht
+
+      # =========================
+      # CIFS / SMB (NAS / Server)
+      # =========================
+
+      CIFS_SHARE: "//192.168.178.25/System_Backup"
+      # ↑ SMB/CIFS-Freigabe (IP oder Hostname)
+      # ↑ Zielort für die Backup-Images
+
+      CIFS_USER: "Urmelausmall"
+      # ↑ Benutzername für SMB-Zugriff
+
+      CIFS_DOMAIN: "WORKGROUP"
+      # ↑ Windows-Domain / Workgroup
+      # ↑ Meist WORKGROUP
+
+      CIFS_PASS: "xxxxxxxxxxxx"
+      # ↑ Passwort für den SMB-User
+      # ↑ Achtung: Klartext → besser über .env Datei setzen
+
+      # =========================
+      # GOTIFY (Push-Benachrichtigungen)
+      # =========================
+
+      GOTIFY_ENABLED: "true"
+      # ↑ true  = Push-Nachrichten aktiv
+      # ↑ false = Gotify komplett deaktiviert
+
+      GOTIFY_URL: "http://192.168.178.25:6742"
+      # ↑ URL zum Gotify-Server
+      # ↑ Protokoll & Port prüfen
+
+      GOTIFY_TOKEN: "xxxxxxxxxxxx"
+      # ↑ App-Token aus Gotify
+
+      # =========================
+      # MQTT (z.B. Home Assistant)
+      # =========================
+
+      MQTT_ENABLED: "true"
+      # ↑ true  = MQTT aktiv
+      # ↑ false = MQTT deaktiviert
+
+      MQTT_HOST: "192.168.178.25"
+      # ↑ MQTT-Broker IP oder Hostname
+
+      MQTT_PORT: "1883"
+      # ↑ MQTT-Port (Standard: 1883)
+
+      MQTT_TOPIC_PREFIX: "pi-backups/pi-8gb-backup"
+      # ↑ Basis-Topic für Statusmeldungen
+      # ↑ Sollte eindeutig pro Gerät sein
+      # ↑ Beispiel:
+      #   pi-backups/pi-8gb-backup/status
+
+      MQTT_DISCOVERY_PREFIX: "homeassistant"
+      # ↑ Discovery-Prefix für Home Assistant
+      # ↑ Standard: homeassistant
+
+      # Optional:
+      # MQTT_USER: "..."
+      # MQTT_PASS: "..."

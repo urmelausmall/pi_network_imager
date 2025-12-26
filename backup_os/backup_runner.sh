@@ -67,6 +67,11 @@ export MARKER_DIR="$SHARED_DIR"
 MODE="${MODE:-no-health}"
 ZERO_FILL="${ZERO_FILL:-false}"
 HEALTH_CHECK="${HEALTH_CHECK:-false}"
+BOS_MAINTANCE="${BOS_MAINTANCE:-false}"
+
+if "$BOS_MAINTANCE"; then
+  exit 1
+fi
 
 log "Job-Parameter: MODE=${MODE}, ZERO_FILL=${ZERO_FILL}, HEALTH_CHECK=${HEALTH_CHECK}"
 log "Backup-Script: ${BACKUP_SCRIPT}"

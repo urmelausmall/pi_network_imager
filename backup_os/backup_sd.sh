@@ -383,7 +383,7 @@ if ! mountpoint -q "$BACKUP_DIR"; then
     exit 1
   fi
 
-  local opts="username=${CIFS_USER},password=${CIFS_PASS},domain=${CIFS_DOMAIN},uid=${CIFS_UID},gid=${CIFS_GID},iocharset=utf8,vers=3.0,_netdev"
+  opts="username=${CIFS_USER},password=${CIFS_PASS},domain=${CIFS_DOMAIN},uid=${CIFS_UID},gid=${CIFS_GID},iocharset=utf8,vers=3.0,_netdev"
   if ! mount -t cifs "$CIFS_SHARE" "$BACKUP_DIR" -o "$opts"; then
     log "❌ CIFS-Share konnte NICHT gemountet werden: ${CIFS_SHARE}"
     exit 1
@@ -391,6 +391,7 @@ if ! mountpoint -q "$BACKUP_DIR"; then
 else
   log "[0/4] CIFS-Share bereits gemountet."
 fi
+
 
 # =========================
 # Backup (dd + pigz)
