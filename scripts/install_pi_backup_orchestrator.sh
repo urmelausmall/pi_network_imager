@@ -24,6 +24,7 @@ install_deps() {
 }
 
 ensure_bootorder_allows_sd() {
+  local tmp_in="" tmp_out=""
   echo "[setup] Prüfe Raspberry Pi Bootloader (EEPROM) Boot-Order..."
 
   if ! command -v vcgencmd >/dev/null 2>&1; then
@@ -71,7 +72,11 @@ ensure_bootorder_allows_sd() {
   local tmp_in tmp_out
   tmp_in="$(mktemp)"
   tmp_out="$(mktemp)"
-  trap 'rm -f "$tmp_in" "$tmp_out"' RETURN
+  cleanup_tmp() {
+  [[ -n "${tmp_in:-}"  ]] && rm -f -- "$tmp_in"  || true
+  [[ -n "${tmp_out:-}" ]] && rm -f -- "$tmp_out" || true
+}
+trap cleanup_tmp RETURN
 
   rpi-eeprom-config > "$tmp_in"
 
