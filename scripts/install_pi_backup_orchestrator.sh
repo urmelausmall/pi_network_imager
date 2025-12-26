@@ -294,15 +294,19 @@ handle_completed_job() {
   fi
 
   local msg
-  msg="$(printf "%s\n%s%s%s%s%s%s" \
-    "State: ${st}" \
-    "${mode:+Modus: ${mode}\n}" \
-    "${duration:+Dauer: ${duration}\n}" \
-    "${finished_at:+Fertig: ${finished_at}\n}" \
-    "${reason:+Reason: ${reason}\n}" \
-    "${exit_code:+Exit: ${exit_code}\n}" \
-    "${image_line:+${image_line}}"
-  )"
+  msg="State: ${st}"
+
+  [[ -n "$mode" ]]       && msg+=$'\n'"Modus: ${mode}"
+  [[ -n "$duration" ]]   && msg+=$'\n'"Dauer: ${duration}"
+  [[ -n "$finished_at" ]]&& msg+=$'\n'"Fertig: ${finished_at}"
+  [[ -n "$reason" ]]     && msg+=$'\n'"Reason: ${reason}"
+  [[ -n "$exit_code" ]]  && msg+=$'\n'"Exit: ${exit_code}"
+
+  if [[ -n "${CIFS_SHARE:-}" && -n "$image" ]]; then
+    msg+=$'\n'"Image: ${CIFS_SHARE}/${image}"
+  elif [[ -n "$image" ]]; then
+    msg+=$'\n'"Image: ${image}"
+  fi
 
   notify_gotify "${title_prefix} abgeschlossen (${NODE})" "$msg" "$prio"
 
