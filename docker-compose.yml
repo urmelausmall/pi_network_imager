@@ -59,7 +59,7 @@ services:
       # IMAGE / AUFBEWAHRUNG
       # =========================
 
-      IMAGE_PREFIX: "raspi-8gb-"
+      IMAGE_PREFIX: "raspi-1"
       # ↑ Präfix für den Backup-Dateinamen
       # ↑ Beispiel:
       #   raspi-8gb-2025-12-24_0130.img.gz
@@ -117,7 +117,7 @@ services:
       MQTT_PORT: "1883"
       # ↑ MQTT-Port (Standard: 1883)
 
-      MQTT_TOPIC_PREFIX: "pi-backups/pi-8gb-backup"
+      MQTT_TOPIC_PREFIX: "pi-backups/pi-1-backup"
       # ↑ Basis-Topic für Statusmeldungen
       # ↑ Sollte eindeutig pro Gerät sein
       # ↑ Beispiel:
