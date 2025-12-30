@@ -24,70 +24,71 @@ install_deps() {
 }
 
 ensure_bootorder_allows_sd() {
-  local tmp_in="" tmp_out=""
   echo "[setup] Prüfe Raspberry Pi Bootloader (EEPROM) Boot-Order..."
 
-  if ! command -v vcgencmd >/dev/null 2>&1; then
-    echo "[setup] WARN: vcgencmd nicht gefunden (raspi utils fehlen?) – überspringe Boot-Order Check."
-    return 0
+  local current=""
+  local cfg=""
+
+  # 1) Try vcgencmd (if available)
+  if command -v vcgencmd >/dev/null 2>&1; then
+    cfg="$(vcgencmd bootloader_config 2>/dev/null || true)"
+    # robust: BOOT_ORDER überall finden (case-insensitive), whitespace tolerant
+    current="$(echo "$cfg" | awk -F= 'BEGIN{IGNORECASE=1} $1 ~ /BOOT_ORDER/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
   fi
 
-  local cfg
-  cfg="$(vcgencmd bootloader_config 2>/dev/null || true)"
-  if [[ -z "$cfg" ]]; then
-    echo "[setup] WARN: Konnte bootloader_config nicht lesen – überspringe."
-    return 0
+  # 2) Fallback: rpi-eeprom-config dump (more reliable on some systems)
+  if [[ -z "$current" ]] && command -v rpi-eeprom-config >/dev/null 2>&1; then
+    cfg="$(rpi-eeprom-config 2>/dev/null || true)"
+    current="$(echo "$cfg" | awk -F= 'BEGIN{IGNORECASE=1} $1 ~ /BOOT_ORDER/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
   fi
 
-  local current
-  current="$(echo "$cfg" | awk -F= '/^[[:space:]]*BOOT_ORDER=/{gsub(/[[:space:]]/,"",$2); print $2; exit}')"
-
-  if [[ -z "$current" ]]; then
-    echo "[setup] WARN: BOOT_ORDER nicht gefunden – überspringe."
-    return 0
+  if [[ -n "$current" ]]; then
+    echo "[setup] Aktueller BOOT_ORDER: ${current}"
+  else
+    echo "[setup] WARN: BOOT_ORDER nicht gefunden – wird bei Bedarf angelegt."
   fi
 
-  echo "[setup] Aktueller BOOT_ORDER: ${current}"
-
-  # Wir wollen SD (0x1) vor USB (0x4) irgendwo in der Order haben.
-  # Falls SD gar nicht drin ist oder nach USB kommt, setzen wir auf 0x14 (SD->USB).
-  # (0x14 = 0x1 dann 0x4; Pi versucht SD, sonst USB.)
-  # Hinweis: Manche Systeme nutzen zusätzlich 0xf.. für Retry – das ist okay, aber hier minimal/robust.
+  # Ziel: SD -> USB
   local desired="0x14"
 
-  # Heuristik: wenn current bereits mit 0x1... beginnt oder 0x14 enthält -> ok
-  if [[ "${current,,}" == 0x1* ]] || [[ "${current,,}" == *14* ]]; then
-    echo "[setup] BOOT_ORDER scheint SD->USB bereits zu erlauben – OK."
-    return 0
+  # Wenn current existiert und bereits SD zuerst zulässt: nix tun
+  if [[ -n "$current" ]]; then
+    if [[ "${current,,}" == 0x1* ]] || [[ "${current,,}" == *14* ]]; then
+      echo "[setup] BOOT_ORDER scheint SD->USB bereits zu erlauben – OK."
+      return 0
+    fi
   fi
 
-  echo "[setup] Setze BOOT_ORDER auf ${desired} (SD -> USB)..."
-
+  # Wenn wir hier sind: wir wollen BOOT_ORDER setzen/erzeugen
   if ! command -v rpi-eeprom-config >/dev/null 2>&1; then
-    echo "[setup] WARN: rpi-eeprom-config fehlt – installiere raspberrypi-eeprom?"
+    echo "[setup] WARN: rpi-eeprom-config fehlt – kann BOOT_ORDER nicht setzen."
+    echo "[setup]       (Meist trotzdem OK, weil Default greift.)"
     return 0
   fi
 
-  # EEPROM Config read -> modify -> apply
-  local tmp_in tmp_out
+  echo "[setup] Setze/erzeuge BOOT_ORDER=${desired} (SD -> USB)..."
+
+  local tmp_in="" tmp_out=""
+  cleanup_tmp() {
+    [[ -n "${tmp_in:-}"  ]] && rm -f -- "$tmp_in"  || true
+    [[ -n "${tmp_out:-}" ]] && rm -f -- "$tmp_out" || true
+  }
+  trap cleanup_tmp RETURN
+
   tmp_in="$(mktemp)"
   tmp_out="$(mktemp)"
-  cleanup_tmp() {
-  [[ -n "${tmp_in:-}"  ]] && rm -f -- "$tmp_in"  || true
-  [[ -n "${tmp_out:-}" ]] && rm -f -- "$tmp_out" || true
-}
-trap cleanup_tmp RETURN
 
+  # Read current editable config
   rpi-eeprom-config > "$tmp_in"
 
-  if grep -qE '^[#[:space:]]*BOOT_ORDER=' "$tmp_in"; then
-    sed -E 's|^[#[:space:]]*BOOT_ORDER=.*|BOOT_ORDER='"${desired}"'|g' "$tmp_in" > "$tmp_out"
+  # Replace if exists, else append
+  if grep -qiE '^[#[:space:]]*BOOT_ORDER=' "$tmp_in"; then
+    sed -E 's|^[#[:space:]]*BOOT_ORDER=.*|BOOT_ORDER='"${desired}"'|I' "$tmp_in" > "$tmp_out"
   else
     cat "$tmp_in" > "$tmp_out"
     echo "BOOT_ORDER=${desired}" >> "$tmp_out"
   fi
 
-  # Apply
   if rpi-eeprom-config --apply "$tmp_out"; then
     echo "[setup] EEPROM Update eingeplant. Reboot erforderlich."
   else
@@ -95,6 +96,7 @@ trap cleanup_tmp RETURN
     return 0
   fi
 }
+
 
 setup_backup_shared_mount_mainos() {
   local LABEL_NAME="BACKUP_SHARED"
