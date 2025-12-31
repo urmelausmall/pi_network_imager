@@ -26,12 +26,14 @@ install_deps() {
 ensure_bootorder_allows_sd() {
   echo "[setup] Prüfe Raspberry Pi Bootloader (EEPROM) Boot-Order + USB Timings..."
 
-  local desired_boot_order="0x14"      # SD -> USB
+  # WICHTIG: BOOT_ORDER wird von rechts nach links gelesen:
+  # 0x41 = SD (1) -> USB (4)
+  # 0xF41 = SD -> USB -> restart loop (optional)
+  local desired_boot_order="0x41"
   local desired_tryboot="0"
   local desired_usb_delay="5000"       # ms
   local desired_usb_pwr_off="500"      # ms
 
-  # Read current config (best effort)
   local cfg=""
   if command -v vcgencmd >/dev/null 2>&1; then
     cfg="$(vcgencmd bootloader_config 2>/dev/null || true)"
@@ -40,7 +42,6 @@ ensure_bootorder_allows_sd() {
     cfg="$(rpi-eeprom-config 2>/dev/null || true)"
   fi
 
-  # Extract current values (case-insensitive, whitespace tolerant)
   local cur_boot_order="" cur_tryboot="" cur_usb_delay="" cur_usb_pwr_off=""
   cur_boot_order="$(echo "$cfg" | awk -F= 'BEGIN{IGNORECASE=1} $1 ~ /^[[:space:]]*BOOT_ORDER[[:space:]]*$/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
   cur_tryboot="$(echo "$cfg" | awk -F= 'BEGIN{IGNORECASE=1} $1 ~ /^[[:space:]]*TRYBOOT[[:space:]]*$/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
@@ -49,12 +50,11 @@ ensure_bootorder_allows_sd() {
 
   echo "[setup] Aktuell: BOOT_ORDER=${cur_boot_order:-<unset>}, TRYBOOT=${cur_tryboot:-<unset>}, USB_MSD_STARTUP_DELAY=${cur_usb_delay:-<unset>}, USB_MSD_PWR_OFF_TIME=${cur_usb_pwr_off:-<unset>}"
 
-  # Decide if we need changes
-  need_change="false"
-[[ -z "$cur_boot_order"  || "${cur_boot_order,,}"  != "${desired_boot_order,,}"  ]] && need_change="true"
-[[ -z "$cur_tryboot"     || "${cur_tryboot,,}"     != "${desired_tryboot,,}"     ]] && need_change="true"
-[[ -z "$cur_usb_delay"   || "${cur_usb_delay,,}"   != "${desired_usb_delay,,}"   ]] && need_change="true"
-[[ -z "$cur_usb_pwr_off" || "${cur_usb_pwr_off,,}" != "${desired_usb_pwr_off,,}"  ]] && need_change="true"
+  local need_change="false"
+  [[ -z "$cur_boot_order"  || "${cur_boot_order,,}"  != "${desired_boot_order,,}"  ]] && need_change="true"
+  [[ -z "$cur_tryboot"     || "${cur_tryboot,,}"     != "${desired_tryboot,,}"     ]] && need_change="true"
+  [[ -z "$cur_usb_delay"   || "${cur_usb_delay,,}"   != "${desired_usb_delay,,}"   ]] && need_change="true"
+  [[ -z "$cur_usb_pwr_off" || "${cur_usb_pwr_off,,}" != "${desired_usb_pwr_off,,}"  ]] && need_change="true"
 
   if [[ "$need_change" == "false" ]]; then
     echo "[setup] EEPROM Config bereits OK – keine Änderung nötig."
@@ -63,7 +63,7 @@ ensure_bootorder_allows_sd() {
 
   if ! command -v rpi-eeprom-config >/dev/null 2>&1; then
     echo "[setup] WARN: rpi-eeprom-config fehlt – kann EEPROM Werte nicht setzen."
-    echo "[setup]       Installiere: sudo apt install -y rpi-eeprom"
+    echo "[setup]       Installiere: sudo apt-get install -y rpi-eeprom"
     return 0
   fi
 
@@ -76,44 +76,33 @@ ensure_bootorder_allows_sd() {
   local tmp_in tmp_out
   tmp_in="$(mktemp)"
   tmp_out="$(mktemp)"
+  trap 'rm -f -- "${tmp_in:-}" "${tmp_out:-}" 2>/dev/null || true' RETURN
 
-  cleanup_tmp() {
-    rm -f -- "${tmp_in:-}" "${tmp_out:-}" 2>/dev/null || true
-  }
-  trap cleanup_tmp RETURN
-
-  # Dump editable config
   rpi-eeprom-config > "$tmp_in"
+  cp -f "$tmp_in" "$tmp_out"
 
-  # Helper to upsert a KEY=VALUE (replace if exists else append)
   upsert_key() {
     local key="$1" val="$2"
     if grep -qiE "^[#[:space:]]*${key}[[:space:]]*=" "$tmp_out"; then
-      # Replace
       sed -i -E "s|^[#[:space:]]*(${key})[[:space:]]*=.*|\\1=${val}|I" "$tmp_out"
     else
       echo "${key}=${val}" >> "$tmp_out"
     fi
   }
 
-  # Start with input as base
-  cp -f "$tmp_in" "$tmp_out"
-
-  # Upsert the values
   upsert_key "BOOT_ORDER" "$desired_boot_order"
   upsert_key "TRYBOOT" "$desired_tryboot"
   upsert_key "USB_MSD_STARTUP_DELAY" "$desired_usb_delay"
   upsert_key "USB_MSD_PWR_OFF_TIME" "$desired_usb_pwr_off"
 
-  # Apply
   if rpi-eeprom-config --apply "$tmp_out"; then
     echo "[setup] EEPROM Update eingeplant. Reboot erforderlich."
   else
     echo "[setup] WARN: EEPROM Apply fehlgeschlagen. Bitte manuell prüfen:"
     echo "       sudo rpi-eeprom-config --edit"
-    return 0
   fi
 }
+
 
 
 
