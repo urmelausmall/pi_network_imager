@@ -29,14 +29,11 @@ ensure_bootorder_allows_sd() {
   local current=""
   local cfg=""
 
-  # 1) Try vcgencmd (if available)
   if command -v vcgencmd >/dev/null 2>&1; then
     cfg="$(vcgencmd bootloader_config 2>/dev/null || true)"
-    # robust: BOOT_ORDER überall finden (case-insensitive), whitespace tolerant
     current="$(echo "$cfg" | awk -F= 'BEGIN{IGNORECASE=1} $1 ~ /BOOT_ORDER/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
   fi
 
-  # 2) Fallback: rpi-eeprom-config dump (more reliable on some systems)
   if [[ -z "$current" ]] && command -v rpi-eeprom-config >/dev/null 2>&1; then
     cfg="$(rpi-eeprom-config 2>/dev/null || true)"
     current="$(echo "$cfg" | awk -F= 'BEGIN{IGNORECASE=1} $1 ~ /BOOT_ORDER/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
@@ -48,40 +45,38 @@ ensure_bootorder_allows_sd() {
     echo "[setup] WARN: BOOT_ORDER nicht gefunden – wird bei Bedarf angelegt."
   fi
 
-  # Ziel: SD -> USB
-  local desired="0x14"
+  local desired="0x14"   # SD -> USB
 
-  # Wenn current existiert und bereits SD zuerst zulässt: nix tun
+  # Schon gut?
   if [[ -n "$current" ]]; then
-    if [[ "${current,,}" == 0x1* ]] || [[ "${current,,}" == *14* ]]; then
-      echo "[setup] BOOT_ORDER scheint SD->USB bereits zu erlauben – OK."
+    if [[ "${current,,}" == 0x14 ]] || [[ "${current,,}" == 0x1* ]]; then
+      echo "[setup] BOOT_ORDER erlaubt SD->USB bereits – OK."
       return 0
     fi
   fi
 
-  # Wenn wir hier sind: wir wollen BOOT_ORDER setzen/erzeugen
   if ! command -v rpi-eeprom-config >/dev/null 2>&1; then
     echo "[setup] WARN: rpi-eeprom-config fehlt – kann BOOT_ORDER nicht setzen."
-    echo "[setup]       (Meist trotzdem OK, weil Default greift.)"
     return 0
   fi
 
   echo "[setup] Setze/erzeuge BOOT_ORDER=${desired} (SD -> USB)..."
 
-  local tmp_in="" tmp_out=""
+  local tmp_in=""
+  local tmp_out=""
+
   cleanup_tmp() {
-    [[ -n "${tmp_in:-}"  ]] && rm -f -- "$tmp_in"  || true
-    [[ -n "${tmp_out:-}" ]] && rm -f -- "$tmp_out" || true
+    # robust gegen set -u
+    [[ -n "${tmp_in:-}"  ]] && rm -f -- "${tmp_in}"  || true
+    [[ -n "${tmp_out:-}" ]] && rm -f -- "${tmp_out}" || true
   }
   trap cleanup_tmp RETURN
 
   tmp_in="$(mktemp)"
   tmp_out="$(mktemp)"
 
-  # Read current editable config
   rpi-eeprom-config > "$tmp_in"
 
-  # Replace if exists, else append
   if grep -qiE '^[#[:space:]]*BOOT_ORDER=' "$tmp_in"; then
     sed -E 's|^[#[:space:]]*BOOT_ORDER=.*|BOOT_ORDER='"${desired}"'|I' "$tmp_in" > "$tmp_out"
   else
@@ -96,6 +91,8 @@ ensure_bootorder_allows_sd() {
     return 0
   fi
 }
+
+
 
 
 setup_backup_shared_mount_mainos() {
@@ -140,6 +137,36 @@ setup_backup_shared_mount_mainos() {
     echo "[setup] Hinweis: Shared-Mount nicht aktiv (noch nicht verfügbar) – wird automatisch gemountet sobald Device da ist."
   fi
 }
+
+init_bootos_net_env_mainos() {
+  local shared="/backupos_shared"
+  local out="${shared}/bootos_net.env"
+
+  echo "[setup] Lege initial bootos_net.env an (best effort)..."
+
+  mkdir -p "$shared"
+  mountpoint -q "$shared" || mount -a || true
+
+  local iface gw cidr
+  iface="$(ip route show default 0.0.0.0/0 2>/dev/null | awk '{print $5; exit}')"
+  gw="$(ip route show default 0.0.0.0/0 2>/dev/null | awk '{print $3; exit}')"
+  if [[ -n "$iface" ]]; then
+    cidr="$(ip -4 addr show dev "$iface" 2>/dev/null | awk '/inet /{print $2; exit}')"
+  fi
+
+  if [[ -n "${iface:-}" && -n "${gw:-}" && -n "${cidr:-}" ]]; then
+    cat > "$out" <<EOF
+IFACE="${iface}"
+CIDR="${cidr}"
+GW="${gw}"
+EOF
+    sync
+    echo "[setup] OK: ${out} geschrieben (${iface} / ${cidr} / gw ${gw})"
+  else
+    echo "[setup] WARN: Konnte Default-Netz nicht sauber erkennen – bootos_net.env nicht erstellt."
+  fi
+}
+
 
 write_orchestrator() {
   echo "[setup] Schreibe Orchestrator nach ${ORCH_PATH}..."
@@ -246,6 +273,38 @@ load_req_env() {
   # shellcheck source=/dev/null
   source "$req"
   set +a
+}
+
+detect_main_net() {
+  IFACE=""
+  CIDR=""
+  GW=""
+
+  IFACE="$(ip route show default 0.0.0.0/0 2>/dev/null | awk '{print $5; exit}')"
+  GW="$(ip route show default 0.0.0.0/0 2>/dev/null | awk '{print $3; exit}')"
+  if [[ -n "$IFACE" ]]; then
+    CIDR="$(ip -4 addr show dev "$IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')"
+  fi
+
+  if [[ -z "$IFACE" || -z "$CIDR" || -z "$GW" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+write_bootos_net_profile() {
+  local out="${SHARED_DIR}/bootos_net.env"
+  if detect_main_net; then
+    cat > "$out" <<EOFNET
+IFACE="${IFACE}"
+CIDR="${CIDR}"
+GW="${GW}"
+EOFNET
+    sync
+    log "Boot-OS Netzprofil aktualisiert: IFACE=$IFACE CIDR=$CIDR GW=$GW"
+  else
+    log "WARN: Konnte Main-OS Netzprofil nicht ermitteln (bootos_net.env unverändert)."
+  fi
 }
 
 enable_sd_boot() {
@@ -460,6 +519,7 @@ handle_pending_usb_job() {
 "Modus: ${MODE}
 Wechsle in ${BOOT_OS_TAG} und starte Backup..." 4
 
+  write_bootos_net_profile || true
   enable_sd_boot || true
   sync
   sleep 2
@@ -533,6 +593,7 @@ main() {
   need_root
   install_deps
   setup_backup_shared_mount_mainos
+  init_bootos_net_env_mainos
   write_orchestrator
   write_service
   disable_old_units
