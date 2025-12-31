@@ -332,6 +332,26 @@ strip_mainos_tag() { echo "$1" | sed -E 's/\[MAIN-OS\]//Ig'; }
 normalize_prefix_trailing_underscores() { echo "$1" | sed -E 's/[[:space:]]+//g; s/_+$//'; }
 
 run_sdimage_job() {
+
+local LOG_FILE="${SHARED_DIR}/sdimage.log"
+
+log_sd() {
+  local msg="[$(date '+%F %T')] [sdimage] $*"
+  echo "$msg"
+  echo "$msg" >> "$LOG_FILE"
+}
+
+# optional: Log rotieren
+rotate_sd_log() {
+  local keep=5
+  [[ -f "${LOG_FILE}.${keep}" ]] && rm -f "${LOG_FILE}.${keep}"
+  for ((i=keep-1; i>=1; i--)); do
+    [[ -f "${LOG_FILE}.${i}" ]] && mv -f "${LOG_FILE}.${i}" "${LOG_FILE}.$((i+1))"
+  done
+  [[ -f "$LOG_FILE" ]] && mv -f "$LOG_FILE" "${LOG_FILE}.1"
+}
+rotate_sd_log
+
   local req_file="$1" flag_file="$2"
   local start_ts end_ts dur dur_str end_human
   start_ts="$(date +%s)"
@@ -384,10 +404,15 @@ run_sdimage_job() {
   image_name="${IMAGE_PREFIX}${date_str}.img.gz"
   image_path="${BACKUP_DIR}/${image_name}"
 
-  notify_gotify "SD-Backup startet (${NODE})" \
+  notify_gotify "SD-Backup startet (${NODE})" \ 
 "Modus: ${MODE}
 Quelle: ${SD_DEV}
 Ziel: ${CIFS_SHARE}/${image_name}" 4
+
+log_sd "SD-Backup startet (${NODE})" \ 
+"Modus: ${MODE}
+Quelle: ${SD_DEV}
+Ziel: ${CIFS_SHARE}/${image_name}"
 
   if [[ "${MQTT_ENABLED:-false}" == "true" ]]; then
     local base="${MQTT_TOPIC_PREFIX:-pi-backups}/${NODE}"
@@ -407,6 +432,11 @@ Ziel: ${CIFS_SHARE}/${image_name}" 4
       notify_gotify "SD-Backup FEHLER (${NODE})" \
 "dd/${ZIP_CMD} fehlgeschlagen (rc=${rc})
 Image: ${CIFS_SHARE}/${image_name}" 8
+
+log_sd "SD-Backup FEHLER (${NODE})" \
+"dd/${ZIP_CMD} fehlgeschlagen (rc=${rc})
+Image: ${CIFS_SHARE}/${image_name}"
+
       return 1
     fi
     sync
@@ -427,6 +457,13 @@ Image: ${CIFS_SHARE}/${image_name}" 8
     echo "IMAGE=\"${image_name}\""
   } > "$SD_STATUS_ENV" || true
 
+    log_sd "STATE=success"
+    log_sd "MODE=${MODE}"
+    log_sd "FINISHED_AT=\"${end_human}\""
+    log_sd "DURATION=\"${dur_str}\""
+    log_sd "SECONDS=${dur}"
+    log_sd "IMAGE=\"${image_name}\""
+
   write_flag "$flag_file" "success"
 
   notify_gotify "SD-Backup fertig (${NODE})" \
@@ -434,7 +471,15 @@ Image: ${CIFS_SHARE}/${image_name}" 8
 Dauer: ${dur_str}
 Fertig: ${end_human}
 Image: ${CIFS_SHARE}/${image_name}" 5
+
+log_sd "SD-Backup fertig (${NODE})" \
+"Modus: ${MODE}
+Dauer: ${dur_str}
+Fertig: ${end_human}
+Image: ${CIFS_SHARE}/${image_name}"
 }
+
+
 
 handle_completed_job() {
   local kind="$1" flag="$2" req="$3" status_env="$4"
