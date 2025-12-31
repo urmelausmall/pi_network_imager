@@ -24,75 +24,93 @@ install_deps() {
 }
 
 ensure_bootorder_allows_sd() {
-  echo "[setup] Prüfe Raspberry Pi Bootloader (EEPROM) Boot-Order..."
+  echo "[setup] Prüfe Raspberry Pi Bootloader (EEPROM) Boot-Order + USB Timings..."
 
-  local current=""
+  local desired_boot_order="0x14"      # SD -> USB
+  local desired_tryboot="0"
+  local desired_usb_delay="5000"       # ms
+  local desired_usb_pwr_off="500"      # ms
+
+  # Read current config (best effort)
   local cfg=""
-
   if command -v vcgencmd >/dev/null 2>&1; then
     cfg="$(vcgencmd bootloader_config 2>/dev/null || true)"
-    current="$(echo "$cfg" | awk -F= 'BEGIN{IGNORECASE=1} $1 ~ /BOOT_ORDER/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
   fi
-
-  if [[ -z "$current" ]] && command -v rpi-eeprom-config >/dev/null 2>&1; then
+  if [[ -z "$cfg" ]] && command -v rpi-eeprom-config >/dev/null 2>&1; then
     cfg="$(rpi-eeprom-config 2>/dev/null || true)"
-    current="$(echo "$cfg" | awk -F= 'BEGIN{IGNORECASE=1} $1 ~ /BOOT_ORDER/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
   fi
 
-  if [[ -n "$current" ]]; then
-    echo "[setup] Aktueller BOOT_ORDER: ${current}"
-  else
-    echo "[setup] WARN: BOOT_ORDER nicht gefunden – wird bei Bedarf angelegt."
-  fi
+  # Extract current values (case-insensitive, whitespace tolerant)
+  local cur_boot_order="" cur_tryboot="" cur_usb_delay="" cur_usb_pwr_off=""
+  cur_boot_order="$(echo "$cfg" | awk -F= 'BEGIN{IGNORECASE=1} $1 ~ /^[[:space:]]*BOOT_ORDER[[:space:]]*$/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
+  cur_tryboot="$(echo "$cfg" | awk -F= 'BEGIN{IGNORECASE=1} $1 ~ /^[[:space:]]*TRYBOOT[[:space:]]*$/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
+  cur_usb_delay="$(echo "$cfg" | awk -F= 'BEGIN{IGNORECASE=1} $1 ~ /^[[:space:]]*USB_MSD_STARTUP_DELAY[[:space:]]*$/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
+  cur_usb_pwr_off="$(echo "$cfg" | awk -F= 'BEGIN{IGNORECASE=1} $1 ~ /^[[:space:]]*USB_MSD_PWR_OFF_TIME[[:space:]]*$/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
 
-  local desired="0x14"   # SD -> USB
+  echo "[setup] Aktuell: BOOT_ORDER=${cur_boot_order:-<unset>}, TRYBOOT=${cur_tryboot:-<unset>}, USB_MSD_STARTUP_DELAY=${cur_usb_delay:-<unset>}, USB_MSD_PWR_OFF_TIME=${cur_usb_pwr_off:-<unset>}"
 
-  # Schon gut?
-  if [[ -n "$current" ]]; then
-    if [[ "${current,,}" == 0x14 ]] || [[ "${current,,}" == 0x1* ]]; then
-      echo "[setup] BOOT_ORDER erlaubt SD->USB bereits – OK."
-      return 0
-    fi
-  fi
+  # Decide if we need changes
+  local need_change="false"
+  [[ -z "$cur_boot_order"  || "${cur_boot_order,,}"  != "${desired_boot_order,,}" ]] && need_change="true"
+  [[ -z "$cur_tryboot"     || "${cur_tryboot,,}"     != "${desired_tryboot,,}"    ]] && need_change="true"
+  [[ -z "$cur_usb_delay"   || "${cur_usb_delay,,}"   != "${desired_usb_delay,,}"  ]] && need_change="true"
+  [[ -z "$cur_usb_pwr_off" || "${cur_usb_pwr_off,,}" != "${desired_usb_pwr_off,,}"]] && need_change="true"
 
-  if ! command -v rpi-eeprom-config >/dev/null 2>&1; then
-    echo "[setup] WARN: rpi-eeprom-config fehlt – kann BOOT_ORDER nicht setzen."
+  if [[ "$need_change" == "false" ]]; then
+    echo "[setup] EEPROM Config bereits OK – keine Änderung nötig."
     return 0
   fi
 
-  echo "[setup] Setze/erzeuge BOOT_ORDER=${desired} (SD -> USB)..."
+  if ! command -v rpi-eeprom-config >/dev/null 2>&1; then
+    echo "[setup] WARN: rpi-eeprom-config fehlt – kann EEPROM Werte nicht setzen."
+    echo "[setup]       Installiere: sudo apt install -y rpi-eeprom"
+    return 0
+  fi
 
-  local tmp_in=""
-  local tmp_out=""
+  echo "[setup] Setze/ergänze EEPROM Keys:"
+  echo "        BOOT_ORDER=${desired_boot_order} (SD -> USB)"
+  echo "        TRYBOOT=${desired_tryboot}"
+  echo "        USB_MSD_STARTUP_DELAY=${desired_usb_delay}"
+  echo "        USB_MSD_PWR_OFF_TIME=${desired_usb_pwr_off}"
 
-  cleanup_tmp() {
-    # robust gegen set -u
-    [[ -n "${tmp_in:-}"  ]] && rm -f -- "${tmp_in}"  || true
-    [[ -n "${tmp_out:-}" ]] && rm -f -- "${tmp_out}" || true
-  }
-  trap cleanup_tmp RETURN
-
+  local tmp_in tmp_out
   tmp_in="$(mktemp)"
   tmp_out="$(mktemp)"
 
+  cleanup_tmp() {
+    rm -f -- "${tmp_in:-}" "${tmp_out:-}" 2>/dev/null || true
+  }
+  trap cleanup_tmp RETURN
+
+  # Dump editable config
   rpi-eeprom-config > "$tmp_in"
 
-  if grep -qiE '^[#[:space:]]*BOOT_ORDER=' "$tmp_in"; then
-    sed -E '
-  s|^[#[:space:]]*BOOT_ORDER=.*|BOOT_ORDER=0x14|I;
-  s|^[#[:space:]]*USB_MSD_STARTUP_DELAY=.*|USB_MSD_STARTUP_DELAY=5000|I;
-  s|^[#[:space:]]*USB_MSD_PWR_OFF_TIME=.*|USB_MSD_PWR_OFF_TIME=500|I;
-  s|^[#[:space:]]*TRYBOOT=.*|TRYBOOT=0|I
-' "$tmp_in" > "$tmp_out"
-  else
-    cat "$tmp_in" > "$tmp_out"
-    echo "BOOT_ORDER=${desired}" >> "$tmp_out"
-  fi
+  # Helper to upsert a KEY=VALUE (replace if exists else append)
+  upsert_key() {
+    local key="$1" val="$2"
+    if grep -qiE "^[#[:space:]]*${key}[[:space:]]*=" "$tmp_out"; then
+      # Replace
+      sed -i -E "s|^[#[:space:]]*(${key})[[:space:]]*=.*|\\1=${val}|I" "$tmp_out"
+    else
+      echo "${key}=${val}" >> "$tmp_out"
+    fi
+  }
 
+  # Start with input as base
+  cp -f "$tmp_in" "$tmp_out"
+
+  # Upsert the values
+  upsert_key "BOOT_ORDER" "$desired_boot_order"
+  upsert_key "TRYBOOT" "$desired_tryboot"
+  upsert_key "USB_MSD_STARTUP_DELAY" "$desired_usb_delay"
+  upsert_key "USB_MSD_PWR_OFF_TIME" "$desired_usb_pwr_off"
+
+  # Apply
   if rpi-eeprom-config --apply "$tmp_out"; then
     echo "[setup] EEPROM Update eingeplant. Reboot erforderlich."
   else
-    echo "[setup] WARN: EEPROM Apply fehlgeschlagen. Bitte manuell prüfen."
+    echo "[setup] WARN: EEPROM Apply fehlgeschlagen. Bitte manuell prüfen:"
+    echo "       sudo rpi-eeprom-config --edit"
     return 0
   fi
 }
