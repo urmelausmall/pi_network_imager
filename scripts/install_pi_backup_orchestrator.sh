@@ -50,11 +50,11 @@ ensure_bootorder_allows_sd() {
   echo "[setup] Aktuell: BOOT_ORDER=${cur_boot_order:-<unset>}, TRYBOOT=${cur_tryboot:-<unset>}, USB_MSD_STARTUP_DELAY=${cur_usb_delay:-<unset>}, USB_MSD_PWR_OFF_TIME=${cur_usb_pwr_off:-<unset>}"
 
   # Decide if we need changes
-  local need_change="false"
-  [[ -z "$cur_boot_order"  || "${cur_boot_order,,}"  != "${desired_boot_order,,}" ]] && need_change="true"
-  [[ -z "$cur_tryboot"     || "${cur_tryboot,,}"     != "${desired_tryboot,,}"    ]] && need_change="true"
-  [[ -z "$cur_usb_delay"   || "${cur_usb_delay,,}"   != "${desired_usb_delay,,}"  ]] && need_change="true"
-  [[ -z "$cur_usb_pwr_off" || "${cur_usb_pwr_off,,}" != "${desired_usb_pwr_off,,}"]] && need_change="true"
+  need_change="false"
+[[ -z "$cur_boot_order"  || "${cur_boot_order,,}"  != "${desired_boot_order,,}"  ]] && need_change="true"
+[[ -z "$cur_tryboot"     || "${cur_tryboot,,}"     != "${desired_tryboot,,}"     ]] && need_change="true"
+[[ -z "$cur_usb_delay"   || "${cur_usb_delay,,}"   != "${desired_usb_delay,,}"   ]] && need_change="true"
+[[ -z "$cur_usb_pwr_off" || "${cur_usb_pwr_off,,}" != "${desired_usb_pwr_off,,}" ]] && need_change="true"
 
   if [[ "$need_change" == "false" ]]; then
     echo "[setup] EEPROM Config bereits OK – keine Änderung nötig."
