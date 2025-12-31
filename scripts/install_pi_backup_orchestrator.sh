@@ -332,27 +332,34 @@ strip_mainos_tag() { echo "$1" | sed -E 's/\[MAIN-OS\]//Ig'; }
 normalize_prefix_trailing_underscores() { echo "$1" | sed -E 's/[[:space:]]+//g; s/_+$//'; }
 
 run_sdimage_job() {
+  local req_file="$1"
+  local flag_file="$2"
 
-local LOG_FILE="${SHARED_DIR}/sdimage.log"
+  # --- Logging (SD) ---
+  local LOG_FILE="${SHARED_DIR}/sdimage.log"
 
-log_sd() {
-  local msg="[$(date '+%F %T')] [sdimage] $*"
-  echo "$msg"
-  echo "$msg" >> "$LOG_FILE"
-}
+  log_sd() {
+    local text="$1"
+    local line
+    line="$(printf '[%s] [sdimage] %s\n' "$(date '+%F %T')" "$text")"
+    echo -n "$line"
+    echo -n "$line" >> "$LOG_FILE" 2>/dev/null || true
+  }
 
-# optional: Log rotieren
-rotate_sd_log() {
-  local keep=5
-  [[ -f "${LOG_FILE}.${keep}" ]] && rm -f "${LOG_FILE}.${keep}"
-  for ((i=keep-1; i>=1; i--)); do
-    [[ -f "${LOG_FILE}.${i}" ]] && mv -f "${LOG_FILE}.${i}" "${LOG_FILE}.$((i+1))"
-  done
-  [[ -f "$LOG_FILE" ]] && mv -f "$LOG_FILE" "${LOG_FILE}.1"
-}
-rotate_sd_log
+  rotate_sd_log() {
+    local keep=6
+    [[ -f "${LOG_FILE}.${keep}" ]] && rm -f "${LOG_FILE}.${keep}" 2>/dev/null || true
+    for ((i=keep-1; i>=1; i--)); do
+      [[ -f "${LOG_FILE}.${i}" ]] && mv -f "${LOG_FILE}.${i}" "${LOG_FILE}.$((i+1))" 2>/dev/null || true
+    done
+    [[ -f "$LOG_FILE" ]] && mv -f "$LOG_FILE" "${LOG_FILE}.1" 2>/dev/null || true
+  }
 
-  local req_file="$1" flag_file="$2"
+  mkdir -p "$SHARED_DIR" 2>/dev/null || true
+  rotate_sd_log
+  : > "$LOG_FILE" 2>/dev/null || true
+
+  # --- Start ---
   local start_ts end_ts dur dur_str end_human
   start_ts="$(date +%s)"
 
@@ -361,6 +368,7 @@ rotate_sd_log
 
   local NODE; NODE="$(node_name)"
 
+  # Common vars
   local BACKUP_DIR="${BACKUP_DIR:-/mnt/syno-backup}"
   local IMAGE_PREFIX="${IMAGE_PREFIX:-raspi-}"
   local RETENTION_COUNT="${RETENTION_COUNT:-3}"
@@ -376,49 +384,100 @@ rotate_sd_log
   local DRY_RUN=false
   [[ "$MODE" == "dry-run" ]] && DRY_RUN=true
 
+  # Prefix fix: remove [MAIN-OS], then append _[Boot_OS]_
   IMAGE_PREFIX="$(strip_mainos_tag "$IMAGE_PREFIX")"
   IMAGE_PREFIX="$(normalize_prefix_trailing_underscores "$IMAGE_PREFIX")"
   IMAGE_PREFIX="${IMAGE_PREFIX}_${BOOT_OS_TAG}_"
 
+  # reset SD status files
   rm -f "$SD_STATUS_ENV" "$SD_STATUS_JSON" 2>/dev/null || true
 
+  # detect SD disk
   local SD_DEV
   SD_DEV="$(lsblk -rpno NAME,TYPE | awk '$2=="disk" && $1 ~ /\/dev\/mmcblk[0-9]+$/ {print $1}' | head -n1)"
-  [[ -n "$SD_DEV" ]] || { write_flag "$flag_file" "failed"; return 1; }
-
-  local ZIP_CMD=""
-  if command -v pigz >/dev/null 2>&1; then ZIP_CMD="pigz"
-  elif command -v gzip >/dev/null 2>&1; then ZIP_CMD="gzip"
-  else write_flag "$flag_file" "failed"; return 1
+  if [[ -z "$SD_DEV" ]]; then
+    log_sd "ERROR: SD disk not found (/dev/mmcblkX)"
+    echo "STATE=failed" > "$SD_STATUS_ENV" 2>/dev/null || true
+    echo "ERROR=sd_disk_not_found" >> "$SD_STATUS_ENV" 2>/dev/null || true
+    printf '{"state":"failed","error":"sd_disk_not_found"}\n' > "$SD_STATUS_JSON" 2>/dev/null || true
+    write_flag "$flag_file" "failed"
+    notify_gotify "SD-Backup FEHLER (${NODE})" "Fehler: SD-Disk nicht gefunden." 8
+    return 1
   fi
 
+  # choose compressor
+  local ZIP_CMD=""
+  if command -v pigz >/dev/null 2>&1; then
+    ZIP_CMD="pigz"
+  elif command -v gzip >/dev/null 2>&1; then
+    ZIP_CMD="gzip"
+  else
+    log_sd "ERROR: neither pigz nor gzip found"
+    echo "STATE=failed" > "$SD_STATUS_ENV" 2>/dev/null || true
+    echo "ERROR=no_compressor" >> "$SD_STATUS_ENV" 2>/dev/null || true
+    printf '{"state":"failed","error":"no_compressor"}\n' > "$SD_STATUS_JSON" 2>/dev/null || true
+    write_flag "$flag_file" "failed"
+    notify_gotify "SD-Backup FEHLER (${NODE})" "Fehler: pigz/gzip fehlt." 8
+    return 1
+  fi
+
+  # mount CIFS
   mkdir -p "$BACKUP_DIR"
   if ! mountpoint -q "$BACKUP_DIR"; then
-    [[ -n "$CIFS_SHARE" && -n "$CIFS_PASS" ]] || { write_flag "$flag_file" "failed"; return 1; }
-    local opts="username=${CIFS_USER},password=${CIFS_PASS},domain=${CIFS_DOMAIN},uid=${CIFS_UID},gid=${CIFS_GID},iocharset=utf8,vers=3.0,_netdev"
-    mount -t cifs "$CIFS_SHARE" "$BACKUP_DIR" -o "$opts" || { write_flag "$flag_file" "failed"; return 1; }
+    if [[ -z "$CIFS_SHARE" || -z "$CIFS_PASS" ]]; then
+      log_sd "ERROR: CIFS params missing (CIFS_SHARE/CIFS_PASS)"
+      echo "STATE=failed" > "$SD_STATUS_ENV" 2>/dev/null || true
+      echo "ERROR=cifs_missing" >> "$SD_STATUS_ENV" 2>/dev/null || true
+      printf '{"state":"failed","error":"cifs_missing"}\n' > "$SD_STATUS_JSON" 2>/dev/null || true
+      write_flag "$flag_file" "failed"
+      notify_gotify "SD-Backup FEHLER (${NODE})" "Fehler: CIFS Parameter fehlen." 8
+      return 1
+    fi
+
+    local opts
+    opts="username=${CIFS_USER},password=${CIFS_PASS},domain=${CIFS_DOMAIN},uid=${CIFS_UID},gid=${CIFS_GID},iocharset=utf8,vers=3.0,_netdev"
+    if ! mount -t cifs "$CIFS_SHARE" "$BACKUP_DIR" -o "$opts"; then
+      log_sd "ERROR: CIFS mount failed: ${CIFS_SHARE} -> ${BACKUP_DIR}"
+      echo "STATE=failed" > "$SD_STATUS_ENV" 2>/dev/null || true
+      echo "ERROR=cifs_mount_failed" >> "$SD_STATUS_ENV" 2>/dev/null || true
+      printf '{"state":"failed","error":"cifs_mount_failed"}\n' > "$SD_STATUS_JSON" 2>/dev/null || true
+      write_flag "$flag_file" "failed"
+      notify_gotify "SD-Backup FEHLER (${NODE})" "Fehler: CIFS Mount fehlgeschlagen: ${CIFS_SHARE}" 8
+      return 1
+    fi
   fi
 
+  # build image name
   local date_str image_name image_path
   date_str="$(date +%F_%H%M)"
   image_name="${IMAGE_PREFIX}${date_str}.img.gz"
   image_path="${BACKUP_DIR}/${image_name}"
 
-  notify_gotify "SD-Backup startet (${NODE})" \ 
+  # status running
+  {
+    echo "STATE=running"
+    echo "MODE=${MODE}"
+    echo "SD_DEV=${SD_DEV}"
+    echo "IMAGE=\"${image_name}\""
+  } > "$SD_STATUS_ENV" 2>/dev/null || true
+
+  printf '{"state":"running","mode":"%s","sd_dev":"%s","image":"%s"}\n' \
+    "$MODE" "$SD_DEV" "$image_name" > "$SD_STATUS_JSON" 2>/dev/null || true
+
+  # notify start
+  notify_gotify "SD-Backup startet (${NODE})" \
 "Modus: ${MODE}
 Quelle: ${SD_DEV}
 Ziel: ${CIFS_SHARE}/${image_name}" 4
 
-log_sd "SD-Backup startet (${NODE})" \ 
-"Modus: ${MODE}
-Quelle: ${SD_DEV}
-Ziel: ${CIFS_SHARE}/${image_name}"
+  log_sd $'SD-Backup startet ('"${NODE}"$')\n'"Modus: ${MODE}"$'\n'"Quelle: ${SD_DEV}"$'\n'"Ziel: ${CIFS_SHARE}/${image_name}"
 
   if [[ "${MQTT_ENABLED:-false}" == "true" ]]; then
     local base="${MQTT_TOPIC_PREFIX:-pi-backups}/${NODE}"
     mqtt_publish_retained "${base}/sdimage/status" "{\"phase\":\"starting\",\"mode\":\"${MODE}\",\"image\":\"${image_name}\"}"
   fi
 
+  # run job (NO logs during dd)
   if $DRY_RUN; then
     sleep 2
   else
@@ -426,28 +485,42 @@ Ziel: ${CIFS_SHARE}/${image_name}"
     dd if="$SD_DEV" bs=4M status=progress | "$ZIP_CMD" > "$image_path"
     local rc=$?
     set -e
+
     if (( rc != 0 )); then
       umount "$BACKUP_DIR" 2>/dev/null || true
+
+      echo "STATE=failed" > "$SD_STATUS_ENV" 2>/dev/null || true
+      echo "ERROR=dd_failed_rc_${rc}" >> "$SD_STATUS_ENV" 2>/dev/null || true
+      printf '{"state":"failed","error":"dd_failed_rc_%d","image":"%s"}\n' "$rc" "$image_name" > "$SD_STATUS_JSON" 2>/dev/null || true
+
       write_flag "$flag_file" "failed"
+
       notify_gotify "SD-Backup FEHLER (${NODE})" \
 "dd/${ZIP_CMD} fehlgeschlagen (rc=${rc})
 Image: ${CIFS_SHARE}/${image_name}" 8
 
-log_sd "SD-Backup FEHLER (${NODE})" \
-"dd/${ZIP_CMD} fehlgeschlagen (rc=${rc})
-Image: ${CIFS_SHARE}/${image_name}"
+      log_sd $'SD-Backup FEHLER ('"${NODE}"$')\n'"dd/${ZIP_CMD} fehlgeschlagen (rc=${rc})"$'\n'"Image: ${CIFS_SHARE}/${image_name}"
+
+      if [[ "${MQTT_ENABLED:-false}" == "true" ]]; then
+        local base="${MQTT_TOPIC_PREFIX:-pi-backups}/${NODE}"
+        mqtt_publish_retained "${base}/sdimage/status" "{\"phase\":\"failed\",\"rc\":${rc},\"image\":\"${image_name}\"}"
+      fi
 
       return 1
     fi
     sync
   fi
 
+  # unmount CIFS
   umount "$BACKUP_DIR" 2>/dev/null || true
+
+  # finish timings
   end_ts="$(date +%s)"
   dur=$(( end_ts - start_ts ))
   dur_str="$(format_duration "$dur")"
   end_human="$(date '+%d.%m.%Y %H:%M')"
 
+  # status success
   {
     echo "STATE=success"
     echo "MODE=${MODE}"
@@ -455,14 +528,10 @@ Image: ${CIFS_SHARE}/${image_name}"
     echo "DURATION=\"${dur_str}\""
     echo "SECONDS=${dur}"
     echo "IMAGE=\"${image_name}\""
-  } > "$SD_STATUS_ENV" || true
+  } > "$SD_STATUS_ENV" 2>/dev/null || true
 
-    log_sd "STATE=success"
-    log_sd "MODE=${MODE}"
-    log_sd "FINISHED_AT=\"${end_human}\""
-    log_sd "DURATION=\"${dur_str}\""
-    log_sd "SECONDS=${dur}"
-    log_sd "IMAGE=\"${image_name}\""
+  printf '{"state":"success","mode":"%s","finished_at":"%s","duration":"%s","seconds":%d,"image":"%s"}\n' \
+    "$MODE" "$end_human" "$dur_str" "$dur" "$image_name" > "$SD_STATUS_JSON" 2>/dev/null || true
 
   write_flag "$flag_file" "success"
 
@@ -472,12 +541,16 @@ Dauer: ${dur_str}
 Fertig: ${end_human}
 Image: ${CIFS_SHARE}/${image_name}" 5
 
-log_sd "SD-Backup fertig (${NODE})" \
-"Modus: ${MODE}
-Dauer: ${dur_str}
-Fertig: ${end_human}
-Image: ${CIFS_SHARE}/${image_name}"
+  log_sd $'SD-Backup fertig ('"${NODE}"$')\n'"Modus: ${MODE}"$'\n'"Dauer: ${dur_str}"$'\n'"Fertig: ${end_human}"$'\n'"Image: ${CIFS_SHARE}/${image_name}"
+
+  if [[ "${MQTT_ENABLED:-false}" == "true" ]]; then
+    local base="${MQTT_TOPIC_PREFIX:-pi-backups}/${NODE}"
+    mqtt_publish_retained "${base}/sdimage/status" "{\"phase\":\"success\",\"mode\":\"${MODE}\",\"duration\":\"${dur_str}\",\"finished_at\":\"${end_human}\",\"image\":\"${image_name}\"}"
+  fi
+
+  return 0
 }
+
 
 
 
