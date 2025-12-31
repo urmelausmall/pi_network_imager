@@ -54,7 +54,7 @@ ensure_bootorder_allows_sd() {
 [[ -z "$cur_boot_order"  || "${cur_boot_order,,}"  != "${desired_boot_order,,}"  ]] && need_change="true"
 [[ -z "$cur_tryboot"     || "${cur_tryboot,,}"     != "${desired_tryboot,,}"     ]] && need_change="true"
 [[ -z "$cur_usb_delay"   || "${cur_usb_delay,,}"   != "${desired_usb_delay,,}"   ]] && need_change="true"
-[[ -z "$cur_usb_pwr_off" || "${cur_usb_pwr_off,,}" != "${desired_usb_pwr_off,,}" ]] && need_change="true"
+[[ -z "$cur_usb_pwr_off" || "${cur_usb_pwr_off,,}" != "${desired_usb_pwr_off,,}"  ]] && need_change="true"
 
   if [[ "$need_change" == "false" ]]; then
     echo "[setup] EEPROM Config bereits OK – keine Änderung nötig."
