@@ -332,19 +332,23 @@ EOFNET
 
 enable_sd_boot() {
   mkdir -p "$SD_BOOT_MNT"
-  local sd_boot_dev
-  sd_boot_dev="$(lsblk -rpno NAME,FSTYPE | awk '$2=="vfat" && $1 ~ /\/dev\/mmcblk[0-9]+p[0-9]+$/ {print $1}' | head -n1)"
-  [[ -n "$sd_boot_dev" ]] || { log "ERROR: No SD boot partition found."; return 1; }
+
+  local sd_boot_dev="/dev/mmcblk0p1"
+  if [[ ! -b "$sd_boot_dev" ]]; then
+    log "ERROR: SD boot device not found: $sd_boot_dev"
+    return 1
+  fi
 
   mount "$sd_boot_dev" "$SD_BOOT_MNT"
+
   local f="${SD_BOOT_MNT}/start4.elf"
   local fd="${SD_BOOT_MNT}/start4.elf.disabled"
 
   if [[ -f "$fd" ]]; then
-    mv "$fd" "$f"
-    log "SD boot enabled (start4.elf)."
+    mv -f "$fd" "$f"
+    log "SD boot enabled on ${sd_boot_dev} (start4.elf)."
   else
-    log "SD boot already enabled."
+    log "SD boot already enabled on ${sd_boot_dev}."
   fi
 
   sync
