@@ -78,7 +78,12 @@ ensure_bootorder_allows_sd() {
   rpi-eeprom-config > "$tmp_in"
 
   if grep -qiE '^[#[:space:]]*BOOT_ORDER=' "$tmp_in"; then
-    sed -E 's|^[#[:space:]]*BOOT_ORDER=.*|BOOT_ORDER='"${desired}"'|I' "$tmp_in" > "$tmp_out"
+    sed -E '
+  s|^[#[:space:]]*BOOT_ORDER=.*|BOOT_ORDER=0x14|I;
+  s|^[#[:space:]]*USB_MSD_STARTUP_DELAY=.*|USB_MSD_STARTUP_DELAY=5000|I;
+  s|^[#[:space:]]*USB_MSD_PWR_OFF_TIME=.*|USB_MSD_PWR_OFF_TIME=500|I;
+  s|^[#[:space:]]*TRYBOOT=.*|TRYBOOT=0|I
+' "$tmp_in" > "$tmp_out"
   else
     cat "$tmp_in" > "$tmp_out"
     echo "BOOT_ORDER=${desired}" >> "$tmp_out"
