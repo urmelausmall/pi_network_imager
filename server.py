@@ -226,6 +226,7 @@ class Handler(BaseHTTPRequestHandler):
             env_lines.append(f'MODE="{_shell_escape(mode)}"')
             env_lines.append(f'HEALTH_CHECK={"true" if mode == "with-health" else "false"}')
             env_lines.append(f'BOS_MAINTANCE={"true" if bos_maintance else "false"}')
+            env_lines.append(f'BOS_UPDATE={"true" if bos_update else "false"}')
 
             if BACKUP_NODE_NAME:
                 env_lines.append(f'BACKUP_NODE_NAME="{_shell_escape(BACKUP_NODE_NAME)}"')
@@ -242,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
                 print(
-                    f"[API] Backup-Job geschrieben: mode={mode}, BOS_MAINTANCE={bos_maintance}, request={request_path}",
+                    f"[API] Backup-Job geschrieben: mode={mode}, BOS_MAINTANCE={bos_maintance}, BOS_UPDATE={bos_update}, request={request_path}",
                     flush=True
                 )
 
@@ -250,6 +251,7 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "backup_scheduled",
                     "mode": mode,
                     "bos_maintance": bos_maintance,
+                    "bos_update": bos_update,
                     "shared_dir": SHARED_DIR,
                     "request": os.path.basename(request_path),
                     "flag": os.path.basename(flag_path),
@@ -266,7 +268,7 @@ class Handler(BaseHTTPRequestHandler):
             )
 
             print(
-                f"[API] SD-Image-Job geschrieben: mode={mode}, BOS_MAINTANCE={bos_maintance}, request={request_path}",
+                f"[API] SD-Image-Job geschrieben: mode={mode}, BOS_MAINTANCE={bos_maintance}, BOS_UPDATE={bos_update}, request={request_path}",
                 flush=True
             )
 
@@ -274,6 +276,7 @@ class Handler(BaseHTTPRequestHandler):
                 "status": "sdimage_scheduled",
                 "mode": mode,
                 "bos_maintance": bos_maintance,
+                "bos_update": bos_update,
                 "shared_dir": SHARED_DIR,
                 "request": os.path.basename(request_path),
                 "flag": os.path.basename(flag_path),

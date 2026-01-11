@@ -159,11 +159,42 @@ BOS_UPDATE="${BOS_UPDATE:-false}"   # <-- NEU
 if "$BOS_UPDATE"; then
   log "BOS_UPDATE=true → führe apt update/upgrade aus und reboote zurück"
 
+  # apt-daily/unattended-upgrades können parallel locken
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl stop apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+  systemctl stop unattended-upgrades.service 2>/dev/null || true
+fi
+
   UPDATE_LOG="$SHARED_DIR/bos_update.log"
   {
     echo "===== $(date -Is) :: BOS_UPDATE START ====="
     echo "+ apt-get update"
     apt-get update
+
+wait_for_apt_lock() {
+  local max_sec="${1:-180}"
+  local waited=0
+
+  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
+     || fuser /var/lib/dpkg/lock >/dev/null 2>&1 \
+     || fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
+    local pids
+    pids="$( (fuser /var/lib/dpkg/lock-frontend 2>/dev/null || true; \
+             fuser /var/lib/dpkg/lock 2>/dev/null || true; \
+             fuser /var/cache/apt/archives/lock 2>/dev/null || true) | tr '\n' ' ' )"
+    log "⏳ APT/Dpkg Lock aktiv (PIDs: ${pids:-?}) — warte… (${waited}/${max_sec}s)"
+    sleep 2
+    waited=$((waited + 2))
+    if (( waited >= max_sec )); then
+      log "❌ Timeout: APT/Dpkg Lock nach ${max_sec}s noch aktiv."
+      return 1
+    fi
+  done
+  return 0
+}
+
+    echo "+ warte auf apt/dpkg lock (max 180s)"
+    wait_for_apt_lock 180
     echo "+ apt-get -y upgrade"
     DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
     echo "+ apt-get -y autoremove"
