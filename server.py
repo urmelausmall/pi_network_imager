@@ -80,6 +80,7 @@ def _read_request(parsed, headers, rfile):
 
     mode = qs.get("mode", [None])[0]
     bos_maintance = _to_bool(qs.get("bos_maintance", [None])[0], default=False)
+    bos_update = _to_bool(qs.get("bos_update", [None])[0], default=False)
 
     length = int(headers.get("Content-Length") or 0)
     if length > 0:
@@ -91,10 +92,12 @@ def _read_request(parsed, headers, rfile):
                     mode = data["mode"]
                 if "bos_maintance" in data:
                     bos_maintance = _to_bool(data["bos_maintance"], default=bos_maintance)
+                if "bos_update" in data:
+                    bos_update = _to_bool(data["bos_update"], default=bos_update)
         except Exception:
             pass
 
-    return mode, bos_maintance
+    return mode, bos_maintance, bos_update
 
 
 def _ensure_shared_dir():
@@ -162,7 +165,7 @@ class Handler(BaseHTTPRequestHandler):
         # ----------------------------
         # Request lesen
         # ----------------------------
-        mode, bos_maintance = _read_request(parsed, self.headers, self.rfile)
+        mode, bos_maintance, bos_update = _read_request(parsed, self.headers, self.rfile)
 
         if mode not in ("dry-run", "no-health", "with-health"):
             self._send_json(400, {

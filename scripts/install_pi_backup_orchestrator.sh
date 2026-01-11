@@ -235,6 +235,44 @@ format_duration() {
   fi
 }
 
+read_last_json_field() {
+  # args: file key
+  local f="$1" key="$2"
+  [[ -f "$f" ]] || return 0
+  sed -n 's/.*"'$key'":"\([^"]*\)".*/format_duration() {
+  local secs="$1"
+  local h=$((secs / 3600))
+  local m=$(((secs % 3600) / 60))
+  local s=$((secs % 60))
+  if (( h > 0 )); then printf "%d Std %d Min" "$h" "$m"
+  elif (( m > 0 )); then printf "%d Min %d Sek" "$m" "$s"
+  else printf "%d Sek" "$s"
+  fi
+}
+/p' "$f" | head -n1
+}
+
+last_run_hint() {
+  local f="${SHARED_DIR}/last_run.json"
+  local fin dur
+  fin="$(read_last_json_field "$f" finished_at)"
+  dur="$(read_last_json_field "$f" duration)"
+  if [[ -n "$fin" || -n "$dur" ]]; then
+    echo "Letzter Lauf: ${fin:-?} (Dauer: ${dur:-?})"
+  fi
+}
+
+last_update_hint() {
+  local f="${SHARED_DIR}/last_update.json"
+  local fin dur
+  fin="$(read_last_json_field "$f" finished_at)"
+  dur="$(read_last_json_field "$f" duration)"
+  if [[ -n "$fin" || -n "$dur" ]]; then
+    echo "Letztes Update: ${fin:-?} (Dauer: ${dur:-?})"
+  fi
+}
+
+
 notify_gotify() {
   local title="$1"
   local message="$2"
@@ -593,6 +631,10 @@ handle_completed_job() {
 
   local title_prefix="SD-Backup"
   [[ "$kind" == "usb" ]] && title_prefix="USB-Backup"
+  # Wenn das "USB-Job" eigentlich ein Update ist, hübsch labeln
+  if [[ "${JOB_KIND:-}" == "update" || "${mode:-}" == "update" || "${MODE:-}" == "update" ]]; then
+    title_prefix="Backup-OS Update"
+  fi
 
   local prio=5
   [[ "$st" != "success" ]] && prio=8
@@ -649,9 +691,17 @@ handle_pending_usb_job() {
 
   write_flag "$BACKUP_FLAG" "running"
 
-  notify_gotify "USB-Backup startet (${NODE})" \
-"Modus: ${MODE}
+    if [[ "${BOS_UPDATE:-false}" == "true" ]]; then
+    local hint; hint="$(last_update_hint)"
+    notify_gotify "Backup-OS Update startet (${NODE})" "Aktion: apt update/upgrade
+${hint}
+Wechsle in ${BOOT_OS_TAG} und führe Update aus..." 4
+  else
+    local hint; hint="$(last_run_hint)"
+    notify_gotify "USB-Backup startet (${NODE})" "Modus: ${MODE}
+${hint}
 Wechsle in ${BOOT_OS_TAG} und starte Backup..." 4
+  fi
 
   write_bootos_net_profile || true
   enable_sd_boot || true
